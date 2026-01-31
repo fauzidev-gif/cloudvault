@@ -126,17 +126,14 @@
         }
 
         /* --- SCREENSHOT & RECORDING PROTECTION --- */
-        /* Blur when not focused (Prevents screen capture tools that steal focus) */
         .privacy-mask {
             filter: blur(40px) grayscale(100%);
             pointer-events: none;
             transition: filter 0.2s ease;
         }
-        /* Hide content during printing */
         @media print {
             body { display: none !important; }
         }
-        /* Anti-Record Overlay (Invisible to eyes, breaks some capture algorithms) */
         #recordProtector {
             position: fixed;
             inset: 0;
@@ -280,7 +277,7 @@
                 </div>
                 <div class="bg-indigo-600 p-4 rounded-3xl shadow-lg shadow-indigo-100 text-white">
                     <p class="text-[9px] font-black text-indigo-200 uppercase tracking-widest mb-1">Enkripsi</p>
-                    <p class="text-sm font-bold">AES-256 (WWorker)</p>
+                    <p class="text-sm font-bold">AES-256 (Main)</p>
                 </div>
             </div>
 
@@ -496,91 +493,65 @@
         <span id="toastMsg">Action Success</span>
     </div>
 
-    <!-- Web Worker Logic Inline -->
-    <script id="worker-script" type="application/javascript">
-        self.onmessage = async (e) => {
-            const { action, id, data, key, salt, iv, password } = e.data;
-            
-            try {
-                if (action === "DERIVE_KEY") {
-                    const encoder = new TextEncoder();
-                    const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-                    const derivedKey = await crypto.subtle.deriveKey(
-                        { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
-                        keyMaterial,
-                        { name: "AES-GCM", length: 256 },
-                        true,
-                        ["encrypt", "decrypt"]
-                    );
-                    self.postMessage({ id, status: "SUCCESS" });
-                } 
-                else if (action === "ENCRYPT" || action === "DECRYPT") {
-                    const encoder = new TextEncoder();
-                    const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-                    const cryptoKey = await crypto.subtle.deriveKey(
-                        { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
-                        keyMaterial,
-                        { name: "AES-GCM", length: 256 },
-                        false,
-                        ["encrypt", "decrypt"]
-                    );
-
-                    if (action === "ENCRYPT") {
-                        const generatedIv = crypto.getRandomValues(new Uint8Array(12));
-                        const encryptedContent = await crypto.subtle.encrypt(
-                            { name: "AES-GCM", iv: generatedIv },
-                            cryptoKey,
-                            data
-                        );
-                        const combined = new Uint8Array(generatedIv.length + encryptedContent.byteLength);
-                        combined.set(generatedIv);
-                        combined.set(new Uint8Array(encryptedContent), generatedIv.length);
-                        self.postMessage({ id, result: combined.buffer }, [combined.buffer]);
-                    } else {
-                        const dataView = new Uint8Array(data);
-                        const extractedIv = dataView.slice(0, 12);
-                        const encryptedContent = dataView.slice(12);
-                        const decrypted = await crypto.subtle.decrypt(
-                            { name: "AES-GCM", iv: extractedIv },
-                            cryptoKey,
-                            encryptedContent
-                        );
-                        self.postMessage({ id, result: decrypted }, [decrypted]);
-                    }
-                }
-            } catch (err) {
-                self.postMessage({ id, error: err.message });
-            }
-        };
-    </script>
-
     <script>
         // --- CONSTANTS ---
         const MAX_VAULT_STORAGE_BYTES = 2.5 * 1024 * 1024 * 1024; // 2.5 GB Limit
 
-        // --- NEW SECURITY PROTECTION LOGIC ---
-        function initSecurityProtection() {
-            // 1. Detect Screen Capture/Sharing (Some browsers support this)
-            if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
-                // Not a reliable blocker but can be used for detection
-            }
+        // --- GLOBAL STATE ---
+        let lastTimestamp = performance.now();
+        let frameCount = 0;
+        let lastKnownPassword = "";
+        let vaultSalt = null;
+        let cryptoKeyValid = false;
 
-            // 2. Prevent Common Keys for Screenshots/DevTools
+        // --- CRYPTO HELPERS (MAIN THREAD) ---
+        async function getCryptoKey(password, salt) {
+            const encoder = new TextEncoder();
+            const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+            return await crypto.subtle.deriveKey(
+                { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
+                keyMaterial,
+                { name: "AES-GCM", length: 256 },
+                false,
+                ["encrypt", "decrypt"]
+            );
+        }
+
+        async function encryptData(data) {
+            if (!cryptoKeyValid) return data;
+            const cryptoKey = await getCryptoKey(lastKnownPassword, vaultSalt);
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const encryptedContent = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, cryptoKey, data);
+            
+            const combined = new Uint8Array(iv.length + encryptedContent.byteLength);
+            combined.set(iv);
+            combined.set(new Uint8Array(encryptedContent), iv.length);
+            return combined.buffer;
+        }
+
+        async function decryptData(combinedData) {
+            if (!cryptoKeyValid) return combinedData;
+            const cryptoKey = await getCryptoKey(lastKnownPassword, vaultSalt);
+            const dataView = new Uint8Array(combinedData);
+            const iv = dataView.slice(0, 12);
+            const ciphertext = dataView.slice(12);
+            return await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, cryptoKey, ciphertext);
+        }
+
+        // --- SECURITY PROTECTION ---
+        function initSecurityProtection() {
             window.addEventListener('keydown', (e) => {
-                // Block PrtScn (Limited support)
                 if (e.key === "PrintScreen") {
                     document.body.classList.add('privacy-mask');
                     showToast("Screenshot Diblokir");
                     e.preventDefault();
                 }
-                // Block DevTools shortcuts
                 if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74)) || (e.ctrlKey && e.keyCode === 85)) {
                     e.preventDefault();
                     showToast("Akses Developer Diblokir");
                 }
             });
 
-            // 3. Blur content when focus is lost (Prevents screenshot tools from capturing)
             window.addEventListener('blur', () => {
                 if (cryptoKeyValid) {
                     document.getElementById('mainAppContent').classList.add('privacy-mask');
@@ -593,13 +564,9 @@
                 document.getElementById('recordProtector').style.display = 'none';
             });
 
-            // 4. Listen for Visibility Change
             document.addEventListener('visibilitychange', () => {
-                if (document.hidden) {
-                    document.getElementById('mainAppContent').classList.add('privacy-mask');
-                } else {
-                    document.getElementById('mainAppContent').classList.remove('privacy-mask');
-                }
+                if (document.hidden) document.getElementById('mainAppContent').classList.add('privacy-mask');
+                else document.getElementById('mainAppContent').classList.remove('privacy-mask');
             });
         }
 
@@ -640,8 +607,8 @@
             });
         }
 
-        // --- GOOGLE DRIVE SYNC ENGINE ---
-        const CLIENT_ID = '388713506159-j2s8vltn9f15ivofsq6v0cl6jofre5d8.apps.googleusercontent.com'; // Public Demo ID
+        // --- GOOGLE DRIVE SYNC ---
+        const CLIENT_ID = '388713506159-j2s8vltn9f15ivofsq6v0cl6jofre5d8.apps.googleusercontent.com';
         const SCOPES = 'https://www.googleapis.com/auth/drive.appdata';
         let tokenClient;
         let gapiInited = false;
@@ -649,9 +616,7 @@
 
         function gapiLoaded() { gapi.load('client', intializeGapiClient); }
         async function intializeGapiClient() {
-            await gapi.client.init({
-                discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"],
-            });
+            await gapi.client.init({ discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"] });
             gapiInited = true;
         }
         function gisLoaded() {
@@ -667,9 +632,7 @@
                 },
             });
         }
-        function handleAuthClick() {
-            if (tokenClient) tokenClient.requestAccessToken({prompt: 'consent'});
-        }
+        function handleAuthClick() { if (tokenClient) tokenClient.requestAccessToken({prompt: 'consent'}); }
         function handleSignoutClick() {
             const token = gapi.client.getToken();
             if (token !== null) {
@@ -687,148 +650,42 @@
             try {
                 const items = await db.items.toArray();
                 const config = await db.config.toArray();
-                
-                const pushPackage = {
-                    items: items,
-                    config: config.filter(c => c.key === 'encryption_salt' || c.key === 'auth_signature'),
-                    timestamp: new Date().toISOString()
-                };
-
+                const pushPackage = { items, config: config.filter(c => c.key === 'encryption_salt' || c.key === 'auth_signature'), timestamp: new Date().toISOString() };
                 const blob = new Blob([JSON.stringify(pushPackage)], {type: 'application/json'});
-                const metadata = {
-                    'name': 'vault_sync_data.json.enc',
-                    'parents': ['appDataFolder']
-                };
-
-                const response = await gapi.client.drive.files.list({
-                    q: "name = 'vault_sync_data.json.enc' and 'appDataFolder' in parents",
-                    spaces: 'appDataFolder',
-                    fields: 'files(id)'
-                });
-                
+                const metadata = { 'name': 'vault_sync_data.json.enc', 'parents': ['appDataFolder'] };
+                const response = await gapi.client.drive.files.list({ q: "name = 'vault_sync_data.json.enc' and 'appDataFolder' in parents", spaces: 'appDataFolder', fields: 'files(id)' });
                 const existingFile = response.result.files[0];
                 const form = new FormData();
                 form.append('metadata', new Blob([JSON.stringify(metadata)], {type: 'application/json'}));
                 form.append('file', blob);
-
-                const url = existingFile 
-                    ? `https://www.googleapis.com/upload/drive/v3/files/${existingFile.id}?uploadType=multipart`
-                    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
-
-                const pushReq = await fetch(url, {
-                    method: existingFile ? 'PATCH' : 'POST',
-                    headers: new Headers({ 'Authorization': 'Bearer ' + gapiAuthToken }),
-                    body: form
-                });
-
-                if (pushReq.ok) {
-                    showToast("Sync Berhasil (E2EE)");
-                    recordAuditLog("Push ke Cloud Berhasil", true);
-                } else { throw new Error("Gagal kirim data"); }
-
+                const url = existingFile ? `https://www.googleapis.com/upload/drive/v3/files/${existingFile.id}?uploadType=multipart` : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+                const pushReq = await fetch(url, { method: existingFile ? 'PATCH' : 'POST', headers: new Headers({ 'Authorization': 'Bearer ' + gapiAuthToken }), body: form });
+                if (pushReq.ok) { showToast("Sync Berhasil (E2EE)"); recordAuditLog("Push ke Cloud Berhasil", true); }
+                else throw new Error("Gagal kirim data");
             } catch (e) { showToast("Sync Gagal: " + e.message); }
         }
 
         async function pullFromCloud() {
             if (!gapiAuthToken) return showToast("Hubungkan Drive dulu");
-            
-            const confirmed = await showConfirm(
-                "Konfirmasi Pull", 
-                "Pull dari cloud akan MENGHAPUS data lokal saat ini dan menggantinya dengan data cloud. Lanjutkan?",
-                { variant: 'danger', okText: "Ya, Sinkronisasi" }
-            );
+            const confirmed = await showConfirm("Konfirmasi Pull", "Pull dari cloud akan MENGHAPUS data lokal saat ini dan menggantinya dengan data cloud. Lanjutkan?", { variant: 'danger', okText: "Ya, Sinkronisasi" });
             if (!confirmed) return;
-
             showToast("Mengunduh Data...");
             try {
-                const response = await gapi.client.drive.files.list({
-                    q: "name = 'vault_sync_data.json.enc' and 'appDataFolder' in parents",
-                    spaces: 'appDataFolder',
-                    fields: 'files(id)'
-                });
-
+                const response = await gapi.client.drive.files.list({ q: "name = 'vault_sync_data.json.enc' and 'appDataFolder' in parents", spaces: 'appDataFolder', fields: 'files(id)' });
                 const file = response.result.files[0];
                 if (!file) throw new Error("Data cloud tidak ditemukan");
-
-                const download = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
-                    headers: new Headers({ 'Authorization': 'Bearer ' + gapiAuthToken })
-                });
-
+                const download = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, { headers: new Headers({ 'Authorization': 'Bearer ' + gapiAuthToken }) });
                 const syncData = await download.json();
-                await db.items.clear();
-                await db.config.clear();
-                
+                await db.items.clear(); await db.config.clear();
                 for (let c of syncData.config) await db.config.put(c);
                 for (let i of syncData.items) await db.items.put(i);
-
-                showToast("Sync Selesai! Me-refresh...");
-                recordAuditLog("Pull dari Cloud Berhasil", true);
+                showToast("Sync Selesai! Me-refresh..."); recordAuditLog("Pull dari Cloud Berhasil", true);
                 setTimeout(() => location.reload(), 1500);
-
             } catch (e) { showToast("Pull Gagal: " + e.message); }
         }
 
         function openCloudModal() { document.getElementById('cloudModal').classList.remove('hidden'); }
         function closeCloudModal() { document.getElementById('cloudModal').classList.add('hidden'); }
-
-        // --- WEB WORKER MANAGER ---
-        const workerBlob = new Blob([document.getElementById('worker-script').textContent], { type: 'application/javascript' });
-        const cryptoWorker = new Worker(URL.createObjectURL(workerBlob));
-        const workerCallbacks = new Map();
-
-        cryptoWorker.onmessage = (e) => {
-            const { id, result, error } = e.data;
-            if (workerCallbacks.has(id)) {
-                const { resolve, reject } = workerCallbacks.get(id);
-                workerCallbacks.delete(id);
-                if (error) reject(new Error(error));
-                else resolve(result);
-            }
-        };
-
-        function callWorker(payload, transferables = []) {
-            return new Promise((resolve, reject) => {
-                const id = crypto.randomUUID();
-                workerCallbacks.set(id, { resolve, reject });
-                cryptoWorker.postMessage({ ...payload, id, password: lastKnownPassword, salt: vaultSalt }, transferables);
-            });
-        }
-
-        // --- GLOBAL STATE ---
-        let lastTimestamp = performance.now();
-        let frameCount = 0;
-        let lastKnownPassword = "";
-        let vaultSalt = null;
-        let cryptoKeyValid = false;
-        
-        function updateStatsLoop() {
-            const now = performance.now();
-            frameCount++;
-            if (now >= lastTimestamp + 1000) {
-                const fps = Math.round((frameCount * 1000) / (now - lastTimestamp));
-                const load = Math.max(0, 100 - Math.round((fps / 60) * 100));
-                const cpuDisplay = document.getElementById('statCpu');
-                const sysVal = Math.min(100, Math.max(load, Math.floor(Math.random() * 5)));
-                if (cpuDisplay) cpuDisplay.innerText = sysVal + '%';
-                frameCount = 0;
-                lastTimestamp = now;
-            }
-            requestAnimationFrame(updateStatsLoop);
-        }
-        requestAnimationFrame(updateStatsLoop);
-
-        // --- PWA SETUP ---
-        const manifestData = {
-            "name": "CloudVault Pro",
-            "short_name": "CloudVault",
-            "start_url": ".",
-            "display": "standalone",
-            "background_color": "#ffffff",
-            "theme_color": "#4f46e5",
-            "icons": [{ "src": "https://cdn-icons-png.flaticon.com/512/891/891399.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }]
-        };
-        const manifestBlob = new Blob([JSON.stringify(manifestData)], {type: 'application/json'});
-        document.getElementById('manifest-placeholder').setAttribute('href', URL.createObjectURL(manifestBlob));
 
         // --- DATA LAYER ---
         const db = new Dexie("CloudVaultProDB");
@@ -853,33 +710,39 @@
         }
 
         function setupInactivityListeners() {
-            ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach(event => {
-                window.addEventListener(event, resetInactivityTimer);
-            });
+            ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach(event => { window.addEventListener(event, resetInactivityTimer); });
             resetInactivityTimer();
         }
 
-        // --- WORKER-BASED CRYPTO HELPERS ---
-        async function encryptData(data) {
-            if (!cryptoKeyValid) return data;
-            return await callWorker({ action: "ENCRYPT", data }, [data]);
+        function updateStatsLoop() {
+            const now = performance.now();
+            frameCount++;
+            if (now >= lastTimestamp + 1000) {
+                const fps = Math.round((frameCount * 1000) / (now - lastTimestamp));
+                const load = Math.max(0, 100 - Math.round((fps / 60) * 100));
+                const cpuDisplay = document.getElementById('statCpu');
+                const sysVal = Math.min(100, Math.max(load, Math.floor(Math.random() * 5)));
+                if (cpuDisplay) cpuDisplay.innerText = sysVal + '%';
+                frameCount = 0;
+                lastTimestamp = now;
+            }
+            requestAnimationFrame(updateStatsLoop);
         }
+        requestAnimationFrame(updateStatsLoop);
 
-        async function decryptData(combinedData) {
-            if (!cryptoKeyValid) return combinedData;
-            return await callWorker({ action: "DECRYPT", data: combinedData }, [combinedData]);
-        }
+        // --- PWA ---
+        const manifestData = { "name": "CloudVault Pro", "short_name": "CloudVault", "start_url": ".", "display": "standalone", "background_color": "#ffffff", "theme_color": "#4f46e5", "icons": [{ "src": "https://cdn-icons-png.flaticon.com/512/891/891399.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }] };
+        const manifestBlob = new Blob([JSON.stringify(manifestData)], {type: 'application/json'});
+        document.getElementById('manifest-placeholder').setAttribute('href', URL.createObjectURL(manifestBlob));
 
-        // --- AUDIT LOG LOGIC ---
+        // --- AUDIT LOG ---
         async function recordAuditLog(status, encrypted = true) {
             const timestamp = new Date().toISOString();
             let dataToStore;
             if (encrypted && cryptoKeyValid) {
                 const encoder = new TextEncoder();
                 dataToStore = await encryptData(encoder.encode(status).buffer);
-            } else {
-                dataToStore = status;
-            }
+            } else dataToStore = status;
             await db.logs.add({ date: timestamp, status: dataToStore, is_encrypted: encrypted });
         }
 
@@ -894,244 +757,101 @@
         async function renderLogs() {
             const container = document.getElementById('logContent');
             const logs = await db.logs.orderBy('date').reverse().limit(50).toArray();
-            if (logs.length === 0) {
-                container.innerHTML = '<p class="text-center text-slate-400 py-8 text-sm">Belum ada riwayat akses.</p>';
-                return;
-            }
+            if (logs.length === 0) { container.innerHTML = '<p class="text-center text-slate-400 py-8 text-sm">Belum ada riwayat akses.</p>'; return; }
             let html = '';
             for (const log of logs) {
                 let statusText = log.status;
                 if (log.is_encrypted && cryptoKeyValid) {
-                    try {
-                        const decrypted = await decryptData(log.status);
-                        statusText = new TextDecoder().decode(decrypted);
-                    } catch (e) { statusText = "[Data Terenkripsi]"; }
+                    try { const decrypted = await decryptData(log.status); statusText = new TextDecoder().decode(decrypted); }
+                    catch (e) { statusText = "[Data Terenkripsi]"; }
                 }
                 const isError = statusText.toLowerCase().includes('gagal');
                 const timeStr = new Date(log.date).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-                html += `
-                <div class="flex items-center justify-between p-3 rounded-2xl border ${isError ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}">
-                    <div class="flex items-center gap-3">
-                        <div class="w-8 h-8 rounded-full flex items-center justify-center ${isError ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}">
-                            ${isError ? '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>' : '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'}
-                        </div>
-                        <div>
-                            <p class="text-xs font-bold text-slate-700">${statusText}</p>
-                            <p class="text-[10px] text-slate-400 font-medium">${timeStr}</p>
-                        </div>
-                    </div>
-                </div>`;
+                html += `<div class="flex items-center justify-between p-3 rounded-2xl border ${isError ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded-full flex items-center justify-center ${isError ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}">${isError ? '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>' : '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'}</div><div><p class="text-xs font-bold text-slate-700">${statusText}</p><p class="text-[10px] text-slate-400 font-medium">${timeStr}</p></div></div></div>`;
             }
             container.innerHTML = html;
         }
 
         async function clearLogs() {
-            const confirmed = await showConfirm(
-                "Hapus Riwayat", 
-                "Apakah Anda yakin ingin menghapus seluruh riwayat akses audit? Tindakan ini tidak bisa dibatalkan.",
-                { variant: 'danger' }
-            );
-            if (confirmed) {
-                await db.logs.clear();
-                renderLogs();
-                showToast("Riwayat Berhasil Dihapus");
-            }
+            const confirmed = await showConfirm("Hapus Riwayat", "Apakah Anda yakin ingin menghapus seluruh riwayat akses audit? Tindakan ini tidak bisa dibatalkan.", { variant: 'danger' });
+            if (confirmed) { await db.logs.clear(); renderLogs(); showToast("Riwayat Berhasil Dihapus"); }
         }
 
-        // --- TRASH SYSTEM ---
+        // --- TRASH ---
         async function cleanupTrash() {
             const now = Date.now();
-            const threshold = now - (30 * 24 * 60 * 60 * 1000); // 30 days
+            const threshold = now - (30 * 24 * 60 * 60 * 1000);
             const itemsToDelete = await db.items.where('is_trash').equals(1).and(i => i.deleted_at < threshold).toArray();
-            if (itemsToDelete.length > 0) {
-                await db.items.bulkDelete(itemsToDelete.map(i => i.id));
-                recordAuditLog(`Auto Cleanup Trash: ${itemsToDelete.length} item dihapus permanen`, true);
-            }
+            if (itemsToDelete.length > 0) { await db.items.bulkDelete(itemsToDelete.map(i => i.id)); recordAuditLog(`Auto Cleanup Trash: ${itemsToDelete.length} item dihapus permanen`, true); }
         }
 
-        async function openTrashModal() {
-            if (!cryptoKeyValid) return showToast("Buka vault dulu!");
-            document.getElementById('trashModal').classList.remove('hidden');
-            renderTrashItems();
-        }
-
+        async function openTrashModal() { if (!cryptoKeyValid) return showToast("Buka vault dulu!"); document.getElementById('trashModal').classList.remove('hidden'); renderTrashItems(); }
         function closeTrashModal() { document.getElementById('trashModal').classList.add('hidden'); }
 
         async function renderTrashItems() {
             const container = document.getElementById('trashContent');
             const trashItems = await db.items.where('is_trash').equals(1).toArray();
-            if (trashItems.length === 0) {
-                container.innerHTML = '<p class="text-center text-slate-400 py-12 text-sm">Trash kosong.</p>';
-                return;
-            }
-            container.innerHTML = trashItems.map(item => `
-                <div class="flex items-center justify-between p-3 rounded-2xl border bg-slate-50 border-slate-100">
-                    <div class="flex items-center gap-3 overflow-hidden">
-                        <div class="flex-shrink-0 p-2 bg-red-50 text-red-500 rounded-lg">${getFileIcon(item.type, item.category)}</div>
-                        <div class="truncate">
-                            <p class="text-xs font-bold text-slate-700 truncate">${item.name}</p>
-                            <p class="text-[10px] text-slate-400 font-medium">Hapus: ${new Date(item.deleted_at).toLocaleDateString('id-ID')}</p>
-                        </div>
-                    </div>
-                    <div class="flex gap-1 ml-2">
-                        <button onclick="restoreFromTrash(${item.id})" class="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg" title="Pulihkan">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                        </button>
-                        <button onclick="deletePermanently(${item.id})" class="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Hapus Permanen">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                        </button>
-                    </div>
-                </div>
-            `).join('');
+            if (trashItems.length === 0) { container.innerHTML = '<p class="text-center text-slate-400 py-12 text-sm">Trash kosong.</p>'; return; }
+            container.innerHTML = trashItems.map(item => `<div class="flex items-center justify-between p-3 rounded-2xl border bg-slate-50 border-slate-100"><div class="flex items-center gap-3 overflow-hidden"><div class="flex-shrink-0 p-2 bg-red-50 text-red-500 rounded-lg">${getFileIcon(item.type, item.category)}</div><div class="truncate"><p class="text-xs font-bold text-slate-700 truncate">${item.name}</p><p class="text-[10px] text-slate-400 font-medium">Hapus: ${new Date(item.deleted_at).toLocaleDateString('id-ID')}</p></div></div><div class="flex gap-1 ml-2"><button onclick="restoreFromTrash(${item.id})" class="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg" title="Pulihkan"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg></button><button onclick="deletePermanently(${item.id})" class="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Hapus Permanen"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button></div></div>`).join('');
         }
 
-        async function restoreFromTrash(id) {
-            await db.items.update(id, { is_trash: 0, deleted_at: null });
-            renderTrashItems();
-            renderData();
-            showToast("Item Dipulihkan");
-            recordAuditLog("Item Dipulihkan dari Trash", true);
-        }
+        async function restoreFromTrash(id) { await db.items.update(id, { is_trash: 0, deleted_at: null }); renderTrashItems(); renderData(); showToast("Item Dipulihkan"); recordAuditLog("Item Dipulihkan dari Trash", true); }
+        async function deletePermanently(id) { const confirmed = await showConfirm("Hapus Permanen", "File ini akan dihapus selamanya dari database lokal Anda. Tindakan ini tidak dapat dibatalkan.", { variant: 'danger' }); if (!confirmed) return; await db.items.delete(id); renderTrashItems(); updateStorageInfo(); showToast("Terhapus Permanen"); recordAuditLog("Item Dihapus Permanen", true); }
+        async function emptyTrash() { const confirmed = await showConfirm("Kosongkan Trash", "Semua item di Tempat Sampah akan dihapus secara permanen. Lanjutkan?", { variant: 'danger', okText: "Ya, Kosongkan" }); if (!confirmed) return; const trashItems = await db.items.where('is_trash').equals(1).toArray(); await db.items.bulkDelete(trashItems.map(i => i.id)); renderTrashItems(); updateStorageInfo(); showToast("Trash Kosong"); recordAuditLog("Trash Dikosongkan", true); }
 
-        async function deletePermanently(id) {
-            const confirmed = await showConfirm(
-                "Hapus Permanen", 
-                "File ini akan dihapus selamanya dari database lokal Anda. Tindakan ini tidak dapat dibatalkan.",
-                { variant: 'danger' }
-            );
-            if (!confirmed) return;
-
-            await db.items.delete(id);
-            renderTrashItems();
-            updateStorageInfo();
-            showToast("Terhapus Permanen");
-            recordAuditLog("Item Dihapus Permanen", true);
-        }
-
-        async function emptyTrash() {
-            const confirmed = await showConfirm(
-                "Kosongkan Trash", 
-                "Semua item di Tempat Sampah akan dihapus secara permanen. Lanjutkan?",
-                { variant: 'danger', okText: "Ya, Kosongkan" }
-            );
-            if (!confirmed) return;
-
-            const trashItems = await db.items.where('is_trash').equals(1).toArray();
-            await db.items.bulkDelete(trashItems.map(i => i.id));
-            renderTrashItems();
-            updateStorageInfo();
-            showToast("Trash Kosong");
-            recordAuditLog("Trash Dikosongkan", true);
-        }
-
-        // --- UI CONTROLS ---
-        function toggleSortMenu() {
-            const menu = document.getElementById('customSortMenu');
-            menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
-        }
-
-        function selectSort(value, label) {
-            currentSort = value;
-            document.getElementById('currentSortLabel').innerText = label;
-            document.getElementById('customSortMenu').style.display = 'none';
-            document.querySelectorAll('.sort-option').forEach(opt => opt.innerText === label ? opt.classList.add('active') : opt.classList.remove('active'));
-            renderData();
-        }
-
-        window.addEventListener('click', (e) => {
-            const btn = document.getElementById('sortMenuBtn');
-            const menu = document.getElementById('customSortMenu');
-            if (btn && menu && !btn.contains(e.target) && !menu.contains(e.target)) menu.style.display = 'none';
-        });
+        // --- UI UTILS ---
+        function toggleSortMenu() { const menu = document.getElementById('customSortMenu'); menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; }
+        function selectSort(value, label) { currentSort = value; document.getElementById('currentSortLabel').innerText = label; document.getElementById('customSortMenu').style.display = 'none'; document.querySelectorAll('.sort-option').forEach(opt => opt.innerText === label ? opt.classList.add('active') : opt.classList.remove('active')); renderData(); }
+        window.addEventListener('click', (e) => { const btn = document.getElementById('sortMenuBtn'); const menu = document.getElementById('customSortMenu'); if (btn && menu && !btn.contains(e.target) && !menu.contains(e.target)) menu.style.display = 'none'; });
 
         function checkPasswordStrength(password) {
-            let score = 0;
-            if (password.length > 7) score++;
-            if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
-            if (/[0-9]/.test(password)) score++;
-            if (/[^A-Za-z0-9]/.test(password)) score++;
-            const bar = document.getElementById('pwStrengthBar');
-            const text = document.getElementById('pwStrengthText');
+            let score = 0; if (password.length > 7) score++; if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++; if (/[0-9]/.test(password)) score++; if (/[^A-Za-z0-9]/.test(password)) score++;
+            const bar = document.getElementById('pwStrengthBar'); const text = document.getElementById('pwStrengthText');
             if (password.length === 0) { bar.style.width = '0%'; text.innerText = 'Lemah'; return; }
             switch(score) {
-                case 0: case 1:
-                    bar.style.width = '33%'; bar.className = 'h-full bg-red-500'; text.innerText = 'Lemah'; text.className = 'text-red-500'; break;
-                case 2: case 3:
-                    bar.style.width = '66%'; bar.className = 'h-full bg-amber-500'; text.innerText = 'Sedang'; text.className = 'text-amber-500'; break;
-                case 4:
-                    bar.style.width = '100%'; bar.className = 'h-full bg-emerald-500'; text.innerText = 'Kuat'; text.className = 'text-emerald-500'; break;
+                case 0: case 1: bar.style.width = '33%'; bar.className = 'h-full bg-red-500'; text.innerText = 'Lemah'; text.className = 'text-red-500'; break;
+                case 2: case 3: bar.style.width = '66%'; bar.className = 'h-full bg-amber-500'; text.innerText = 'Sedang'; text.className = 'text-amber-500'; break;
+                case 4: bar.style.width = '100%'; bar.className = 'h-full bg-emerald-500'; text.innerText = 'Kuat'; text.className = 'text-emerald-500'; break;
             }
         }
 
-        // --- UNLOCK LOGIC ---
+        // --- AUTH & UNLOCK ---
         async function unlockVault() {
-            const pwdInput = document.getElementById('masterPassword');
-            const pwd = pwdInput.value;
-            const attemptsEl = document.getElementById('attemptsMsg');
+            const pwdInput = document.getElementById('masterPassword'); const pwd = pwdInput.value; const attemptsEl = document.getElementById('attemptsMsg');
             if (pwd.length < 4) { showToast("Password minimal 4 karakter!"); return; }
-
             try {
-                const lockStatus = await db.config.get('vault_locked');
-                if (lockStatus?.value === true) { triggerPermanentLock(); return; }
-
-                const lockout = await db.config.get('lockout_timestamp');
-                if (lockout?.value > Date.now()) {
-                    showToast(`Tunggu ${Math.ceil((lockout.value - Date.now()) / 1000)} detik.`);
-                    return;
-                }
-
-                let saltObj = await db.config.get('encryption_salt');
-                const authCheck = await db.config.get('auth_signature');
-                
+                const lockStatus = await db.config.get('vault_locked'); if (lockStatus?.value === true) { triggerPermanentLock(); return; }
+                const lockout = await db.config.get('lockout_timestamp'); if (lockout?.value > Date.now()) { showToast(`Tunggu ${Math.ceil((lockout.value - Date.now()) / 1000)} detik.`); return; }
+                let saltObj = await db.config.get('encryption_salt'); const authCheck = await db.config.get('auth_signature');
                 if (!authCheck) {
-                    vaultSalt = crypto.getRandomValues(new Uint8Array(16));
-                    lastKnownPassword = pwd;
+                    vaultSalt = crypto.getRandomValues(new Uint8Array(16)); lastKnownPassword = pwd;
                     await db.config.put({ key: 'encryption_salt', value: vaultSalt });
-                    
-                    cryptoKeyValid = true; 
-                    const encoder = new TextEncoder();
+                    cryptoKeyValid = true; const encoder = new TextEncoder();
                     const signature = await encryptData(encoder.encode("2006").buffer);
-                    
                     await db.config.put({ key: 'auth_signature', value: signature });
                     await db.config.put({ key: 'vault_locked', value: false });
                     await db.config.put({ key: 'login_attempts', value: 0 });
-                    await recordAuditLog("Vault Baru Dibuat", true);
-                    finalizeUnlock();
+                    await recordAuditLog("Vault Baru Dibuat", true); finalizeUnlock();
                 } else {
-                    vaultSalt = saltObj.value;
-                    lastKnownPassword = pwd;
+                    vaultSalt = saltObj.value; lastKnownPassword = pwd; cryptoKeyValid = true;
                     try {
                         const testDecrypt = await decryptData(authCheck.value);
                         if (new TextDecoder().decode(testDecrypt) === "2006") {
-                            cryptoKeyValid = true;
                             await db.config.put({ key: 'login_attempts', value: 0 });
-                            await recordAuditLog("Login Berhasil", true);
-                            finalizeUnlock();
-                        } else { throw new Error(); }
+                            await recordAuditLog("Login Berhasil", true); finalizeUnlock();
+                        } else throw new Error();
                     } catch (e) {
-                        cryptoKeyValid = false;
-                        lastKnownPassword = "";
-                        let stored = await db.config.get('login_attempts');
-                        let count = (stored?.value || 0) + 1;
+                        cryptoKeyValid = false; lastKnownPassword = "";
+                        let stored = await db.config.get('login_attempts'); let count = (stored?.value || 0) + 1;
                         await db.config.put({ key: 'login_attempts', value: count });
                         await recordAuditLog("Gagal Login - Password Salah", false);
                         const remaining = MAX_ATTEMPTS - count;
                         if (remaining <= 0) {
                             if (count === MAX_ATTEMPTS) {
-                                const until = Date.now() + LOCKOUT_DELAY;
-                                await db.config.put({ key: 'lockout_timestamp', value: until });
-                                showToast("Terlalu banyak kegagalan. Lockout 30 detik.");
-                                startLockoutTimer(until);
-                            } else {
-                                await db.config.put({ key: 'vault_locked', value: true });
-                                triggerPermanentLock();
-                            }
-                        } else {
-                            attemptsEl.innerText = `Sisa ${remaining} percobaan lagi`;
-                            attemptsEl.classList.remove('hidden');
-                            showToast(`Password Salah! (${remaining} Sisa)`);
-                            pwdInput.value = '';
-                        }
+                                const until = Date.now() + LOCKOUT_DELAY; await db.config.put({ key: 'lockout_timestamp', value: until });
+                                showToast("Lockout 30 detik."); startLockoutTimer(until);
+                            } else { await db.config.put({ key: 'vault_locked', value: true }); triggerPermanentLock(); }
+                        } else { attemptsEl.innerText = `Sisa ${remaining} percobaan lagi`; attemptsEl.classList.remove('hidden'); showToast(`Password Salah! (${remaining} Sisa)`); pwdInput.value = ''; }
                     }
                 }
             } catch (e) { showToast("Gagal memproses keamanan."); }
@@ -1141,89 +861,45 @@
             const btn = document.getElementById('unlockBtn');
             const timer = setInterval(() => {
                 const diff = Math.ceil((until - Date.now()) / 1000);
-                if (diff <= 0) {
-                    clearInterval(timer); btn.disabled = false; btn.innerHTML = "<span>Buka Vault</span>";
-                } else {
-                    btn.disabled = true; btn.innerHTML = `<span>Tunggu ${diff}s</span>`;
-                }
+                if (diff <= 0) { clearInterval(timer); btn.disabled = false; btn.innerHTML = "<span>Buka Vault</span>"; }
+                else { btn.disabled = true; btn.innerHTML = `<span>Tunggu ${diff}s</span>`; }
             }, 1000);
         }
 
-        function triggerPermanentLock() {
-            document.getElementById('authOverlay').style.display = 'none';
-            document.getElementById('securityOverlay').style.display = 'flex';
-        }
-
+        function triggerPermanentLock() { document.getElementById('authOverlay').style.display = 'none'; document.getElementById('securityOverlay').style.display = 'flex'; }
         function finalizeUnlock() {
-            document.getElementById('authOverlay').style.display = 'none';
-            showToast("Vault Berhasil Dibuka");
-            cleanupTrash(); // Run auto cleanup
-            renderData(); updateStorageInfo(); setupInactivityListeners();
-            initSecurityProtection(); // Start privacy protection
-            gapiLoaded(); gisLoaded();
+            document.getElementById('authOverlay').style.display = 'none'; showToast("Vault Berhasil Dibuka");
+            cleanupTrash(); renderData(); updateStorageInfo(); setupInactivityListeners(); initSecurityProtection(); gapiLoaded(); gisLoaded();
         }
 
         window.onload = async () => {
-            setTimeout(() => {
-                const loader = document.getElementById('initial-loader');
-                loader.classList.add('fade-out');
-                setTimeout(() => loader.remove(), 600);
-            }, 1000);
-
+            setTimeout(() => { const loader = document.getElementById('initial-loader'); loader.classList.add('fade-out'); setTimeout(() => loader.remove(), 600); }, 1000);
             if ((await db.config.get('vault_locked'))?.value === true) return triggerPermanentLock();
-            
-            const lockout = await db.config.get('lockout_timestamp');
-            if (lockout?.value > Date.now()) startLockoutTimer(lockout.value);
-
-            const attempts = await db.config.get('login_attempts');
-            if (attempts?.value > 0 && attempts.value < MAX_ATTEMPTS) {
-                const el = document.getElementById('attemptsMsg');
-                el.innerText = `Sisa ${MAX_ATTEMPTS - attempts.value} percobaan lagi`;
-                el.classList.remove('hidden');
-            }
-
+            const lockout = await db.config.get('lockout_timestamp'); if (lockout?.value > Date.now()) startLockoutTimer(lockout.value);
             if (!(await db.config.get('auth_signature'))) {
                 document.getElementById('authTitle').innerText = "Buat Password Baru";
                 document.getElementById('authDesc').innerText = "Tentukan password untuk mengenkripsi vault baru Anda.";
-                document.getElementById('unlockBtn').innerText = "Buat Vault";
-                document.getElementById('pwStrengthCont').classList.remove('hidden');
+                document.getElementById('unlockBtn').innerText = "Buat Vault"; document.getElementById('pwStrengthCont').classList.remove('hidden');
                 document.getElementById('masterPassword').addEventListener('input', (e) => checkPasswordStrength(e.target.value));
             }
             document.getElementById('masterPassword').focus();
-            document.onkeydown = (e) => {
-                if (e.key === 'Enter' && document.getElementById('authOverlay').style.display !== 'none') {
-                    if(!document.getElementById('unlockBtn').disabled) unlockVault();
-                }
-            };
+            document.onkeydown = (e) => { if (e.key === 'Enter' && document.getElementById('authOverlay').style.display !== 'none') if(!document.getElementById('unlockBtn').disabled) unlockVault(); };
         };
 
         const fileInput = document.getElementById('fileInput');
         document.getElementById('dropzone').onclick = () => fileInput.click();
         
         fileInput.onchange = async (e) => {
-            const files = Array.from(e.target.files);
-            if (files.length === 0) return;
-            const statusUI = document.getElementById('uploadStatus');
-            const bar = document.getElementById('uploadBar');
-            const percentText = document.getElementById('uploadPercent');
-            const nameText = document.getElementById('uploadFileName');
+            const files = Array.from(e.target.files); if (files.length === 0) return;
+            const statusUI = document.getElementById('uploadStatus'); const bar = document.getElementById('uploadBar'); const percentText = document.getElementById('uploadPercent'); const nameText = document.getElementById('uploadFileName');
             statusUI.classList.remove('translate-y-32', 'opacity-0');
-
             for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                nameText.innerText = `(${i + 1}/${files.length}) ${file.name}`;
+                const file = files[i]; nameText.innerText = `(${i + 1}/${files.length}) ${file.name}`;
                 if (file.size > MAX_VAULT_STORAGE_BYTES) { showToast(`File ${file.name} > 2.5GB`); continue; }
-                await processAndSaveFile(file, (prog) => {
-                    const totalProgress = Math.round(((i / files.length) * 100) + (prog / files.length));
-                    bar.style.width = totalProgress + '%';
-                    percentText.innerText = totalProgress + '%';
-                });
+                await processAndSaveFile(file, (prog) => { const totalProgress = Math.round(((i / files.length) * 100) + (prog / files.length)); bar.style.width = totalProgress + '%'; percentText.innerText = totalProgress + '%'; });
             }
             bar.style.width = '100%'; percentText.innerText = '100%';
-            setTimeout(() => {
-                statusUI.classList.add('translate-y-32', 'opacity-0');
-                renderData(); updateStorageInfo(); showToast(`${files.length} File Berhasil`);
-            }, 1000);
+            setTimeout(() => { statusUI.classList.add('translate-y-32', 'opacity-0'); renderData(); updateStorageInfo(); showToast(`${files.length} File Berhasil`); }, 1000);
             fileInput.value = '';
         };
 
@@ -1233,11 +909,7 @@
                 reader.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100)); };
                 reader.onload = async () => {
                     const encrypted = await encryptData(reader.result);
-                    await db.items.add({
-                        name: escapeHtml(file.name), type: file.type || 'application/octet-stream',
-                        size: file.size, date: new Date().toISOString(), content: encrypted, 
-                        category: 'file', is_trash: 0, deleted_at: null
-                    });
+                    await db.items.add({ name: escapeHtml(file.name), type: file.type || 'application/octet-stream', size: file.size, date: new Date().toISOString(), content: encrypted, category: 'file', is_trash: 0, deleted_at: null });
                     resolve();
                 };
                 reader.readAsArrayBuffer(file);
@@ -1245,15 +917,9 @@
         }
 
         async function saveNote() {
-            const inputEl = document.getElementById('noteInput');
-            const text = inputEl.value.trim(); if(!text) return;
-            const encoder = new TextEncoder();
-            const encrypted = await encryptData(encoder.encode(text).buffer);
-            await db.items.add({
-                name: escapeHtml(text.substring(0, 40)) + (text.length > 40 ? '...' : ''),
-                type: 'text/plain', size: new Blob([text]).size, date: new Date().toISOString(),
-                content: encrypted, category: 'note', is_trash: 0, deleted_at: null
-            });
+            const inputEl = document.getElementById('noteInput'); const text = inputEl.value.trim(); if(!text) return;
+            const encoder = new TextEncoder(); const encrypted = await encryptData(encoder.encode(text).buffer);
+            await db.items.add({ name: escapeHtml(text.substring(0, 40)) + (text.length > 40 ? '...' : ''), type: 'text/plain', size: new Blob([text]).size, date: new Date().toISOString(), content: encrypted, category: 'note', is_trash: 0, deleted_at: null });
             inputEl.value = ''; showToast("Catatan Disimpan"); renderData(); updateStorageInfo();
         }
 
@@ -1266,166 +932,71 @@
             if (currentFilter !== 'all') items = items.filter(i => i.category === currentFilter);
             if (searchQuery) items = items.filter(i => i.name.toLowerCase().includes(searchQuery));
             items.sort((a, b) => {
-                switch(currentSort) {
-                    case 'date-desc': return new Date(b.date) - new Date(a.date);
-                    case 'date-asc': return new Date(a.date) - new Date(b.date);
-                    case 'name-asc': return a.name.localeCompare(b.name);
-                    case 'name-desc': return b.name.localeCompare(a.name);
-                    case 'size-desc': return b.size - a.size;
-                    default: return 0;
-                }
+                if (currentSort === 'date-desc') return new Date(b.date) - new Date(a.date);
+                if (currentSort === 'date-asc') return new Date(a.date) - new Date(b.date);
+                if (currentSort === 'name-asc') return a.name.localeCompare(b.name);
+                if (currentSort === 'name-desc') return b.name.localeCompare(a.name);
+                if (currentSort === 'size-desc') return b.size - a.size;
+                return 0;
             });
-
-            if (items.length === 0) {
-                grid.innerHTML = `<div class="col-span-full py-24 text-center"><div class="inline-flex p-5 bg-slate-100 rounded-full mb-4 text-slate-300"><svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg></div><h4 class="text-slate-500 font-medium text-lg">Hasil Tidak Ditemukan</h4></div>`;
-                return;
-            }
-
+            if (items.length === 0) { grid.innerHTML = `<div class="col-span-full py-24 text-center"><div class="inline-flex p-5 bg-slate-100 rounded-full mb-4 text-slate-300"><svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg></div><h4 class="text-slate-500 font-medium text-lg">Hasil Tidak Ditemukan</h4></div>`; return; }
             grid.innerHTML = items.map(item => {
-                const isNote = item.category === 'note';
-                const date = new Date(item.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
-                return `
-                <div class="group bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all p-4 relative flex flex-col h-[200px]">
-                    <div class="flex items-start justify-between mb-2">
-                        <div class="p-2.5 rounded-xl ${isNote ? 'bg-amber-50 text-amber-600' : 'bg-indigo-50 text-indigo-600'}">${getFileIcon(item.type, item.category)}</div>
-                        <button onclick="deleteItem(${item.id})" class="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
-                    </div>
-                    <div class="flex-grow overflow-hidden cursor-default">
-                        <h3 class="font-bold text-slate-800 text-sm line-clamp-2 mb-1">${item.name}</h3>
-                        <p class="text-[10px] font-bold text-slate-400 uppercase">${formatBytes(item.size)} • ${date}</p>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2 mt-4">
-                        <button onclick="openPreview(${item.id})" class="bg-slate-100 text-slate-600 py-2 rounded-lg text-[10px] font-bold hover:bg-slate-200">PREVIEW</button>
-                        <button onclick="downloadItem(${item.id})" class="bg-indigo-600 text-white py-2 rounded-lg text-[10px] font-bold hover:bg-indigo-700">UNDUH</button>
-                    </div>
-                </div>`;
+                const isNote = item.category === 'note'; const date = new Date(item.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+                return `<div class="group bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all p-4 relative flex flex-col h-[200px]"><div class="flex items-start justify-between mb-2"><div class="p-2.5 rounded-xl ${isNote ? 'bg-amber-50 text-amber-600' : 'bg-indigo-50 text-indigo-600'}">${getFileIcon(item.type, item.category)}</div><button onclick="deleteItem(${item.id})" class="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button></div><div class="flex-grow overflow-hidden cursor-default"><h3 class="font-bold text-slate-800 text-sm line-clamp-2 mb-1">${item.name}</h3><p class="text-[10px] font-bold text-slate-400 uppercase">${formatBytes(item.size)} • ${date}</p></div><div class="grid grid-cols-2 gap-2 mt-4"><button onclick="openPreview(${item.id})" class="bg-slate-100 text-slate-600 py-2 rounded-lg text-[10px] font-bold hover:bg-slate-200">PREVIEW</button><button onclick="downloadItem(${item.id})" class="bg-indigo-600 text-white py-2 rounded-lg text-[10px] font-bold hover:bg-indigo-700">UNDUH</button></div></div>`;
             }).join('');
         }
 
         async function openPreview(id) {
             const item = await db.items.get(id); if (!item) return;
-            const modal = document.getElementById('previewModal');
-            const content = document.getElementById('modalContent');
-            content.innerHTML = '<div class="text-white animate-pulse">Dekripsi data aman via Worker...</div>';
-            document.getElementById('modalTitle').innerText = item.name;
-            document.getElementById('modalMeta').innerText = `${item.type} • ${formatBytes(item.size)}`;
-            document.getElementById('modalIcon').innerHTML = getFileIcon(item.type, item.category);
-            document.getElementById('modalDownload').onclick = () => downloadItem(id);
+            const modal = document.getElementById('previewModal'); const content = document.getElementById('modalContent');
+            content.innerHTML = '<div class="text-white animate-pulse">Dekripsi data aman...</div>';
+            document.getElementById('modalTitle').innerText = item.name; document.getElementById('modalMeta').innerText = `${item.type} • ${formatBytes(item.size)}`;
+            document.getElementById('modalIcon').innerHTML = getFileIcon(item.type, item.category); document.getElementById('modalDownload').onclick = () => downloadItem(id);
             modal.classList.remove('hidden'); document.body.classList.add('modal-active');
-
             try {
-                const decryptedBuffer = await decryptData(item.content);
-                const blob = new Blob([decryptedBuffer], { type: item.type });
-                const url = URL.createObjectURL(blob);
+                const decryptedBuffer = await decryptData(item.content); const blob = new Blob([decryptedBuffer], { type: item.type }); const url = URL.createObjectURL(blob);
                 if (item.type.startsWith('image/')) content.innerHTML = `<img src="${url}" class="max-w-full max-h-full object-contain p-4">`;
                 else if (item.type.startsWith('video/')) content.innerHTML = `<video src="${url}" controls class="max-w-full max-h-full" autoplay></video>`;
                 else if (item.type.startsWith('audio/') || item.name.toLowerCase().endsWith('.mp3')) content.innerHTML = `<div class="p-10 text-white flex flex-col items-center gap-6"><audio src="${url}" controls autoplay></audio></div>`;
                 else if (item.type === 'application/pdf') content.innerHTML = `<iframe src="${url}#toolbar=0" class="w-full h-full"></iframe>`;
                 else if (item.category === 'note' || item.type.startsWith('text/')) {
                     const text = new TextDecoder().decode(decryptedBuffer);
-                    content.innerHTML = `
-                        <div class="relative w-full h-full bg-white group/content">
-                            <button onclick="copyToClipboardText()" class="absolute top-4 right-4 z-20 bg-indigo-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all flex items-center gap-2">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
-                                Salin Teks
-                            </button>
-                            <div id="noteContentArea" class="w-full h-full p-8 font-mono text-sm overflow-auto text-slate-800 whitespace-pre-wrap select-text selection:bg-indigo-100">${escapeHtml(text)}</div>
-                        </div>`;
+                    content.innerHTML = `<div class="relative w-full h-full bg-white group/content"><button onclick="copyToClipboardText()" class="absolute top-4 right-4 z-20 bg-indigo-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all flex items-center gap-2"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>Salin Teks</button><div id="noteContentArea" class="w-full h-full p-8 font-mono text-sm overflow-auto text-slate-800 whitespace-pre-wrap select-text selection:bg-indigo-100">${escapeHtml(text)}</div></div>`;
                 }
                 else content.innerHTML = `<div class="text-center text-white p-8"><button onclick="downloadItem(${id})" class="bg-indigo-500 px-6 py-2 rounded-xl">Download untuk Melihat</button></div>`;
             } catch (err) { content.innerHTML = `<div class="text-red-400">Gagal dekripsi.</div>`; }
         }
 
         function copyToClipboardText() {
-            const textArea = document.getElementById('noteContentArea');
-            if (!textArea) return;
-            const text = textArea.innerText;
-            const tempInput = document.createElement("textarea");
-            tempInput.value = text;
-            document.body.appendChild(tempInput);
-            tempInput.select();
-            tempInput.setSelectionRange(0, 99999);
-            try {
-                const successful = document.execCommand('copy');
-                if (successful) showToast("Teks Berhasil Disalin!");
-            } catch (err) {
-                showToast("Gagal menyalin teks.");
-            }
+            const textArea = document.getElementById('noteContentArea'); if (!textArea) return;
+            const text = textArea.innerText; const tempInput = document.createElement("textarea"); tempInput.value = text;
+            document.body.appendChild(tempInput); tempInput.select(); try { document.execCommand('copy'); showToast("Teks Berhasil Disalin!"); } catch (err) { showToast("Gagal menyalin."); }
             document.body.removeChild(tempInput);
         }
 
         function closePreview() {
-            const modal = document.getElementById('previewModal');
-            const content = document.getElementById('modalContent');
-            content.querySelectorAll('video, audio').forEach(m => m.pause());
-            modal.classList.add('hidden'); document.body.classList.remove('modal-active');
-            content.querySelectorAll('[src]').forEach(t => URL.revokeObjectURL(t.src));
-            content.innerHTML = '';
+            const modal = document.getElementById('previewModal'); const content = document.getElementById('modalContent');
+            content.querySelectorAll('video, audio').forEach(m => m.pause()); modal.classList.add('hidden'); document.body.classList.remove('modal-active');
+            content.querySelectorAll('[src]').forEach(t => URL.revokeObjectURL(t.src)); content.innerHTML = '';
         }
 
         async function downloadItem(id) {
             const item = await db.items.get(id); if (!item) return;
-            try {
-                const decrypted = await decryptData(item.content);
-                const blob = new Blob([decrypted], { type: item.type });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a'); a.href = url; a.download = item.category === 'note' ? item.name + ".txt" : item.name;
-                document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-            } catch (e) { showToast("Gagal dekripsi."); }
+            try { const decrypted = await decryptData(item.content); const blob = new Blob([decrypted], { type: item.type }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = item.category === 'note' ? item.name + ".txt" : item.name; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }
+            catch (e) { showToast("Gagal dekripsi."); }
         }
 
-        async function deleteItem(id) { 
-            const confirmed = await showConfirm(
-                "Buang ke Trash?", 
-                "File ini akan dipindahkan ke Tempat Sampah dan akan dihapus otomatis setelah 30 hari.",
-                { okText: "Pindahkan" }
-            );
-            if (!confirmed) return;
-            await db.items.update(id, { is_trash: 1, deleted_at: Date.now() });
-            renderData(); 
-            showToast("Pindah ke Trash (30 Hari)"); 
-            recordAuditLog("Item dipindah ke Trash", true);
-        }
+        async function deleteItem(id) { const confirmed = await showConfirm("Buang ke Trash?", "File ini akan dipindahkan ke Tempat Sampah dan akan dihapus otomatis setelah 30 hari.", { okText: "Pindahkan" }); if (!confirmed) return; await db.items.update(id, { is_trash: 1, deleted_at: Date.now() }); renderData(); showToast("Pindah ke Trash (30 Hari)"); recordAuditLog("Item dipindah ke Trash", true); }
+        function filterType(type) { currentFilter = type; document.querySelectorAll('.filter-btn').forEach(btn => { btn.classList.remove('active', 'bg-slate-100', 'text-indigo-600'); btn.classList.add('text-slate-500'); }); event.currentTarget.classList.add('active', 'bg-slate-100', 'text-indigo-600'); renderData(); }
 
-        function filterType(type) {
-            currentFilter = type;
-            document.querySelectorAll('.filter-btn').forEach(btn => {
-                btn.classList.remove('active', 'bg-slate-100', 'text-indigo-600');
-                btn.classList.add('text-slate-500');
-            });
-            event.currentTarget.classList.add('active', 'bg-slate-100', 'text-indigo-600');
-            renderData();
-        }
-
-        async function updateStorageInfo() {
-            try {
-                const quota = await navigator.storage.estimate();
-                const used = quota.usage || 0;
-                const total = Math.min(quota.quota || MAX_VAULT_STORAGE_BYTES, MAX_VAULT_STORAGE_BYTES);
-                document.getElementById('statUsed').innerText = formatBytes(used);
-                document.getElementById('statRemaining').innerText = formatBytes(Math.max(0, total - used));
-            } catch (e) {}
-        }
-
+        async function updateStorageInfo() { try { const quota = await navigator.storage.estimate(); const used = quota.usage || 0; const total = Math.min(quota.quota || MAX_VAULT_STORAGE_BYTES, MAX_VAULT_STORAGE_BYTES); document.getElementById('statUsed').innerText = formatBytes(used); document.getElementById('statRemaining').innerText = formatBytes(Math.max(0, total - used)); } catch (e) {} }
         function getFileIcon(type, category) {
             if (category === 'note') return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
             if (type.startsWith('image/')) return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>`;
             return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>`;
         }
-
-        function formatBytes(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'], i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-        }
-
-        function showToast(msg) {
-            const toast = document.getElementById('toast');
-            document.getElementById('toastMsg').innerText = msg;
-            toast.classList.remove('translate-y-20', 'opacity-0');
-            setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 3000);
-        }
-
+        function formatBytes(bytes) { if (bytes === 0) return '0 B'; const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'], i = Math.floor(Math.log(bytes) / Math.log(k)); return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]; }
+        function showToast(msg) { const toast = document.getElementById('toast'); document.getElementById('toastMsg').innerText = msg; toast.classList.remove('translate-y-20', 'opacity-0'); setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 3000); }
         function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
     </script>
 </body>
