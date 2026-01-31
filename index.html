@@ -10,13 +10,18 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="description" content="Secure AES-256 Encrypted Cloud Vault">
-    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3064/3064197.png">
+    <!-- Updated Icon for iOS -->
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/891/891399.png">
     
     <!-- Web App Manifest Inline -->
     <link rel="manifest" id="manifest-placeholder">
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/dexie/dist/dexie.js"></script>
+    <!-- Google Drive API Scripts -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js"></script>
+
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
         body { 
@@ -82,9 +87,85 @@
         /* CPU Monitoring Glow */
         .cpu-glow { transition: all 0.3s ease; }
         .cpu-high { color: #ef4444; text-shadow: 0 0 8px rgba(239, 68, 68, 0.4); }
+
+        /* Initial Loading Screen Styles */
+        #initial-loader {
+            position: fixed;
+            inset: 0;
+            z-index: 99999;
+            background: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.6s ease, visibility 0.6s;
+        }
+        .loader-ring {
+            width: 80px;
+            height: 80px;
+            border: 4px solid #f3f4f6;
+            border-top: 4px solid #4f46e5;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .fade-out {
+            opacity: 0;
+            visibility: hidden;
+        }
+
+        /* Custom Confirm Modal Animation */
+        #customConfirmModal.hidden { display: none; }
+        .confirm-scale { animation: confirmPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        @keyframes confirmPop {
+            from { transform: scale(0.9) translateY(10px); opacity: 0; }
+            to { transform: scale(1) translateY(0); opacity: 1; }
+        }
+
+        /* --- SCREENSHOT & RECORDING PROTECTION --- */
+        /* Blur when not focused (Prevents screen capture tools that steal focus) */
+        .privacy-mask {
+            filter: blur(40px) grayscale(100%);
+            pointer-events: none;
+            transition: filter 0.2s ease;
+        }
+        /* Hide content during printing */
+        @media print {
+            body { display: none !important; }
+        }
+        /* Anti-Record Overlay (Invisible to eyes, breaks some capture algorithms) */
+        #recordProtector {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 999999;
+            background: repeating-linear-gradient(45deg, rgba(255,255,255,0.01) 0px, rgba(255,255,255,0.01) 1px, transparent 1px, transparent 2px);
+            display: none;
+        }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen text-slate-900" oncontextmenu="return false">
+    <!-- Record Protector Layer -->
+    <div id="recordProtector"></div>
+
+    <!-- Initial Loading Screen -->
+    <div id="initial-loader">
+        <div class="relative">
+            <div class="loader-ring"></div>
+            <div class="absolute inset-0 flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+            </div>
+        </div>
+        <div class="mt-8 text-center">
+            <h1 class="text-2xl font-bold text-slate-900 tracking-tight">Cloud<span class="text-indigo-600">Vault</span></h1>
+            <p class="text-[10px] text-slate-400 font-black uppercase tracking-[0.3em] mt-2 animate-pulse">Menyiapkan Enkripsi Aman</p>
+        </div>
+    </div>
 
     <!-- Auth Overlay -->
     <div id="authOverlay">
@@ -129,149 +210,156 @@
         </div>
     </div>
 
-    <header class="sticky top-0 z-30 border-b bg-white/80 backdrop-blur-md">
-        <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-                <div class="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
+    <!-- Custom Confirm Modal -->
+    <div id="customConfirmModal" class="fixed inset-0 z-[200] hidden flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"></div>
+        <div class="relative bg-white w-full max-w-sm rounded-[32px] overflow-hidden shadow-2xl confirm-scale">
+            <div class="p-8 text-center">
+                <div id="confirmIconContainer" class="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                 </div>
-                <div>
-                    <h1 class="text-lg font-bold leading-tight">Cloud<span class="text-indigo-600">Vault</span></h1>
-                    <p class="text-[10px] text-slate-500 font-medium uppercase tracking-widest">AES-256 Secure Storage</p>
+                <h3 id="confirmTitle" class="text-xl font-bold text-slate-800 mb-2">Konfirmasi</h3>
+                <p id="confirmDesc" class="text-sm text-slate-500 leading-relaxed mb-8 px-2">Apakah Anda yakin ingin melanjutkan tindakan ini?</p>
+                <div class="flex flex-col gap-3">
+                    <button id="confirmOkBtn" class="w-full bg-indigo-600 text-white font-bold py-4 rounded-2xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100">Ya, Lanjutkan</button>
+                    <button id="confirmCancelBtn" class="w-full bg-slate-100 text-slate-600 font-bold py-4 rounded-2xl hover:bg-slate-200 transition-all">Batalkan</button>
                 </div>
-            </div>
-            <div class="flex items-center gap-2">
-                <!-- Audit Log Button -->
-                <button onclick="openLogModal()" class="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Riwayat Akses">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                </button>
-                <div class="w-px h-6 bg-slate-200 mx-1"></div>
-                <!-- Backup & Restore Buttons -->
-                <button onclick="exportVault()" class="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Backup Vault">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                </button>
-                <button onclick="document.getElementById('importInput').click()" class="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Restore Vault">
-                    <input type="file" id="importInput" class="hidden" accept=".vault" onchange="importVault(this)">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                </button>
-                <div class="w-px h-6 bg-slate-200 mx-1"></div>
-                <button onclick="clearAllData()" class="p-2 text-slate-400 hover:text-red-500 transition-colors" title="Hapus Semua">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                </button>
             </div>
         </div>
-    </header>
+    </div>
 
-    <main class="max-w-6xl mx-auto px-4 py-8">
-        <!-- New System Status Bar for Mobile -->
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
-            <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
-                <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Terpakai</p>
-                <p id="statUsed" class="text-sm font-bold text-slate-800">--</p>
-            </div>
-            <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
-                <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Sisa Ruang</p>
-                <p id="statRemaining" class="text-sm font-bold text-indigo-600">--</p>
-            </div>
-            <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
-                <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">CPU Power</p>
-                <p id="statCpu" class="text-sm font-bold text-slate-800">0%</p>
-            </div>
-            <div class="bg-indigo-600 p-4 rounded-3xl shadow-lg shadow-indigo-100 text-white">
-                <p class="text-[9px] font-black text-indigo-200 uppercase tracking-widest mb-1">Enkripsi</p>
-                <p class="text-sm font-bold">AES-256</p>
-            </div>
-        </div>
-
-        <div class="grid lg:grid-cols-3 gap-6 mb-12">
-            <div class="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 p-1">
-                <div id="dropzone" class="relative group border-2 border-dashed border-slate-200 rounded-xl p-10 text-center hover:bg-indigo-50/50 hover:border-indigo-300 transition-all cursor-pointer">
-                    <input type="file" id="fileInput" class="hidden" multiple>
-                    <div class="flex flex-col items-center">
-                        <div class="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                            </svg>
-                        </div>
-                        <h3 class="text-lg font-semibold text-slate-800">Tarik file ke sini atau klik</h3>
-                        <p class="text-sm text-slate-500 mt-1">File akan dienkripsi sebelum disimpan (Limit: 2GB).</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="bg-indigo-600 rounded-2xl shadow-lg p-6 text-white flex flex-col">
-                <h3 class="font-bold flex items-center gap-2 mb-4">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" />
-                        <path fill-rule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clip-rule="evenodd" />
-                    </svg>
-                    Catatan Cepat Secure
-                </h3>
-                <textarea id="noteInput" class="flex-grow bg-indigo-500/30 border border-indigo-400/50 rounded-xl p-4 text-sm placeholder-indigo-200 outline-none focus:bg-indigo-500/50 transition-all resize-none mb-4" placeholder="Simpan data sensitif Anda di sini..."></textarea>
-                <button onclick="saveNote()" class="bg-white text-indigo-600 font-bold py-3 rounded-xl hover:bg-indigo-50 transition-colors shadow-md shadow-indigo-900/20">Simpan Aman</button>
-            </div>
-        </div>
-
-        <div class="flex flex-col gap-6 mb-8">
-            <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
-                <h2 class="text-2xl font-bold text-slate-800">Manajer File</h2>
-                <div class="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm overflow-hidden">
-                    <button onclick="filterType('all')" class="filter-btn active bg-slate-100 px-4 py-2 text-xs font-bold rounded-lg transition-all text-indigo-600">SEMUA</button>
-                    <button onclick="filterType('file')" class="filter-btn px-4 py-2 text-xs font-bold text-slate-500 rounded-lg transition-all">FILE</button>
-                    <button onclick="filterType('note')" class="filter-btn px-4 py-2 text-xs font-bold text-slate-500 rounded-lg transition-all">CATATAN</button>
-                </div>
-            </div>
-
-            <!-- Toolbar Pencarian & Pengurutan Baru -->
-            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
-                <div class="sm:col-span-3 relative">
-                    <input type="text" id="searchInput" oninput="handleSearch()" class="w-full pl-10 pr-4 py-3 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-sm" placeholder="Cari berdasarkan nama file atau isi catatan...">
-                    <div class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+    <div id="mainAppContent">
+        <header class="sticky top-0 z-30 border-b bg-white/80 backdrop-blur-md">
+            <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <div class="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
                         </svg>
                     </div>
+                    <div>
+                        <h1 class="text-lg font-bold leading-tight">Cloud<span class="text-indigo-600">Vault</span></h1>
+                        <p class="text-[10px] text-slate-500 font-medium uppercase tracking-widest">AES-256 Secure Storage</p>
+                    </div>
                 </div>
-                
-                <!-- Custom Sort Button -->
-                <div class="relative">
-                    <button onclick="toggleSortMenu()" id="sortMenuBtn" class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 flex items-center justify-between hover:border-indigo-300 transition-all shadow-sm">
-                        <span id="currentSortLabel">Terbaru</span>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                <div class="flex items-center gap-2">
+                    <button onclick="openCloudModal()" class="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Private Cloud Sync">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
                         </svg>
                     </button>
+                    <button onclick="openTrashModal()" class="p-2 text-slate-400 hover:text-red-500 transition-colors" title="Tempat Sampah (30 Hari)">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                    </button>
+                    <button onclick="openLogModal()" class="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Riwayat Akses">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <main class="max-w-6xl mx-auto px-4 py-8">
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
+                <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
+                    <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Terpakai</p>
+                    <p id="statUsed" class="text-sm font-bold text-slate-800">--</p>
+                </div>
+                <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
+                    <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Sisa Ruang</p>
+                    <p id="statRemaining" class="text-sm font-bold text-indigo-600">--</p>
+                </div>
+                <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
+                    <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">CPU Power</p>
+                    <p id="statCpu" class="text-sm font-bold text-slate-800">0%</p>
+                </div>
+                <div class="bg-indigo-600 p-4 rounded-3xl shadow-lg shadow-indigo-100 text-white">
+                    <p class="text-[9px] font-black text-indigo-200 uppercase tracking-widest mb-1">Enkripsi</p>
+                    <p class="text-sm font-bold">AES-256 (WWorker)</p>
+                </div>
+            </div>
+
+            <div class="grid lg:grid-cols-3 gap-6 mb-12">
+                <div class="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 p-1">
+                    <div id="dropzone" class="relative group border-2 border-dashed border-slate-200 rounded-xl p-10 text-center hover:bg-indigo-50/50 hover:border-indigo-300 transition-all cursor-pointer">
+                        <input type="file" id="fileInput" class="hidden" multiple>
+                        <div class="flex flex-col items-center">
+                            <div class="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                            </div>
+                            <h3 class="text-lg font-semibold text-slate-800">Tarik file ke sini atau klik</h3>
+                            <p class="text-sm text-slate-500 mt-1">File akan dienkripsi sebelum disimpan (Limit: 2.5GB).</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-indigo-600 rounded-2xl shadow-lg p-6 text-white flex flex-col">
+                    <h3 class="font-bold flex items-center gap-2 mb-4">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" />
+                            <path fill-rule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clip-rule="evenodd" />
+                        </svg>
+                        Catatan Cepat Secure
+                    </h3>
+                    <textarea id="noteInput" class="flex-grow bg-indigo-500/30 border border-indigo-400/50 rounded-xl p-4 text-sm placeholder-indigo-200 outline-none focus:bg-indigo-500/50 transition-all resize-none mb-4" placeholder="Simpan data sensitif Anda di sini..."></textarea>
+                    <button onclick="saveNote()" class="bg-white text-indigo-600 font-bold py-3 rounded-xl hover:bg-indigo-50 transition-colors shadow-md shadow-indigo-900/20">Simpan Aman</button>
+                </div>
+            </div>
+
+            <div class="flex flex-col gap-6 mb-8">
+                <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <h2 class="text-2xl font-bold text-slate-800">Manajer File</h2>
+                    <div class="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm overflow-hidden">
+                        <button onclick="filterType('all')" class="filter-btn active bg-slate-100 px-4 py-2 text-xs font-bold rounded-lg transition-all text-indigo-600">SEMUA</button>
+                        <button onclick="filterType('file')" class="filter-btn px-4 py-2 text-xs font-bold text-slate-500 rounded-lg transition-all">FILE</button>
+                        <button onclick="filterType('note')" class="filter-btn px-4 py-2 text-xs font-bold text-slate-500 rounded-lg transition-all">CATATAN</button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                    <div class="sm:col-span-3 relative">
+                        <input type="text" id="searchInput" oninput="handleSearch()" class="w-full pl-10 pr-4 py-3 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-sm" placeholder="Cari berdasarkan nama file atau isi catatan...">
+                        <div class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                            </svg>
+                        </div>
+                    </div>
                     
-                    <!-- Custom Pop-up Menu -->
-                    <div id="customSortMenu" class="absolute right-0 top-full mt-2 w-full min-w-[160px] bg-white border border-slate-100 rounded-2xl shadow-2xl z-50 overflow-hidden py-1">
-                        <button onclick="selectSort('date-desc', 'Terbaru')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors active">Terbaru</button>
-                        <button onclick="selectSort('date-asc', 'Terlama')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors">Terlama</button>
-                        <div class="h-px bg-slate-50 mx-2"></div>
-                        <button onclick="selectSort('name-asc', 'Nama (A-Z)')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors">Nama (A-Z)</button>
-                        <button onclick="selectSort('name-desc', 'Nama (Z-A)')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors">Nama (Z-A)</button>
-                        <div class="h-px bg-slate-50 mx-2"></div>
-                        <button onclick="selectSort('size-desc', 'Terbesar')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors">Terbesar</button>
+                    <div class="relative">
+                        <button onclick="toggleSortMenu()" id="sortMenuBtn" class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 flex items-center justify-between hover:border-indigo-300 transition-all shadow-sm">
+                            <span id="currentSortLabel">Terbaru</span>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                        </button>
+                        
+                        <div id="customSortMenu" class="absolute right-0 top-full mt-2 w-full min-w-[160px] bg-white border border-slate-100 rounded-2xl shadow-2xl z-50 overflow-hidden py-1">
+                            <button onclick="selectSort('date-desc', 'Terbaru')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors active">Terbaru</button>
+                            <button onclick="selectSort('date-asc', 'Terlama')" class="sort-option w-full text-left px-4 py-3 text-sm font-medium hover:bg-indigo-50 transition-colors">Terlama</button>
+                            <div class="h-px bg-slate-50 mx-2"></div>
+                            <button onclick="selectSort('name-asc', 'Nama (A-Z)')" class="sort-option w-full text-left text-sm font-medium px-4 py-3 hover:bg-indigo-50 transition-colors">Nama (A-Z)</button>
+                            <button onclick="selectSort('name-desc', 'Nama (Z-A)')" class="sort-option w-full text-left text-sm font-medium px-4 py-3 hover:bg-indigo-50 transition-colors">Nama (Z-A)</button>
+                            <div class="h-px bg-slate-50 mx-2"></div>
+                            <button onclick="selectSort('size-desc', 'Terbesar')" class="sort-option w-full text-left text-sm font-medium px-4 py-3 hover:bg-indigo-50 transition-colors">Terbesar</button>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div id="fileGridScrollArea" class="custom-scrollbar">
-            <div id="contentGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6"></div>
-        </div>
-    </main>
+            <div id="fileGridScrollArea" class="custom-scrollbar">
+                <div id="contentGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6"></div>
+            </div>
+        </main>
+    </div>
 
-    <!-- Upload Progress Bar (New Component) -->
     <div id="uploadStatus" class="fixed bottom-6 right-6 z-[110] bg-white p-5 rounded-3xl shadow-2xl border border-slate-100 w-72 transform translate-y-32 opacity-0 transition-all duration-500 pointer-events-none">
         <div class="flex items-center justify-between mb-3">
             <div class="flex items-center gap-2">
@@ -288,7 +376,77 @@
         <p id="uploadFileName" class="text-[10px] text-slate-400 mt-3 truncate font-medium">Menunggu file...</p>
     </div>
 
-    <!-- Modal Riwayat Akses -->
+    <!-- Private Cloud Sync Modal -->
+    <div id="cloudModal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-slate-900/80 backdrop-blur-sm" onclick="closeCloudModal()"></div>
+        <div class="relative bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl flex flex-col">
+            <div class="p-6 border-b bg-slate-50 flex items-center justify-between">
+                <div>
+                    <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
+                        </svg>
+                        Private Cloud Sync (E2EE)
+                    </h3>
+                    <p class="text-[11px] text-slate-500 mt-1 uppercase tracking-wider font-bold">Sinkronisasi Google Drive Aman</p>
+                </div>
+                <button onclick="closeCloudModal()" class="p-2 bg-slate-200 text-slate-600 rounded-lg hover:bg-slate-300 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+            </div>
+            <div class="p-8 space-y-6 text-center">
+                <div id="driveUnconnected" class="space-y-4">
+                    <div class="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg class="w-10 h-10" fill="currentColor" viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>
+                    </div>
+                    <p class="text-sm text-slate-600">Hubungkan Google Drive Anda untuk cadangan E2EE. Data akan dienkripsi secara lokal sebelum dikirim.</p>
+                    <button id="connectDriveBtn" onclick="handleAuthClick()" class="w-full bg-white border border-slate-200 py-3 rounded-xl flex items-center justify-center gap-3 font-bold text-sm hover:bg-slate-50 transition-all shadow-sm">
+                        <img src="https://www.gstatic.com/images/branding/product/1x/drive_48dp.png" class="w-5 h-5" alt="">
+                        Hubungkan Google Drive
+                    </button>
+                </div>
+                <div id="driveConnected" class="hidden space-y-4">
+                    <div class="flex items-center justify-center gap-2 text-emerald-600 font-bold text-sm mb-4">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Google Drive Terhubung
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <button onclick="pushToCloud()" class="bg-indigo-600 text-white py-4 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 transition-all">
+                            Push ke Cloud
+                        </button>
+                        <button onclick="pullFromCloud()" class="bg-white border border-slate-200 text-slate-700 py-4 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-slate-50 transition-all">
+                            Pull dari Cloud
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mt-4 uppercase tracking-[0.2em]">Hanya file terenkripsi yang dikirim</p>
+                    <button onclick="handleSignoutClick()" class="text-[10px] font-bold text-red-400 uppercase tracking-widest mt-4">Putuskan Koneksi</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trash Modal -->
+    <div id="trashModal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-slate-900/80 backdrop-blur-sm" onclick="closeTrashModal()"></div>
+        <div class="relative bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[80vh]">
+            <div class="p-5 border-b flex items-center justify-between bg-slate-50">
+                <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    Trash (Hapus Otomatis 30 Hari)
+                </h3>
+                <button onclick="closeTrashModal()" class="p-2 bg-slate-200 text-slate-600 rounded-lg hover:bg-slate-300">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+            </div>
+            <div id="trashContent" class="flex-grow overflow-auto p-4 space-y-3 custom-scrollbar"></div>
+            <div class="p-4 border-t bg-slate-50 text-center flex gap-2">
+                <button onclick="emptyTrash()" class="flex-grow bg-red-100 text-red-600 py-3 rounded-xl text-xs font-bold hover:bg-red-200 transition-colors">Kosongkan Trash</button>
+            </div>
+        </div>
+    </div>
+
     <div id="logModal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-slate-900/80 backdrop-blur-sm" onclick="closeLogModal()"></div>
         <div class="relative bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[80vh]">
@@ -303,9 +461,7 @@
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
             </div>
-            <div id="logContent" class="flex-grow overflow-auto p-4 space-y-3 custom-scrollbar">
-                <!-- Log items will appear here -->
-            </div>
+            <div id="logContent" class="flex-grow overflow-auto p-4 space-y-3 custom-scrollbar"></div>
             <div class="p-4 border-t bg-slate-50 text-center">
                 <button onclick="clearLogs()" class="text-[10px] font-bold text-red-500 uppercase tracking-widest hover:underline">Hapus Semua Riwayat</button>
             </div>
@@ -332,7 +488,7 @@
                     </button>
                 </div>
             </div>
-            <div id="modalContent" class="flex-grow overflow-auto p-0 flex items-center justify-center bg-slate-900 custom-scrollbar"></div>
+            <div id="modalContent" class="flex-grow overflow-auto p-0 flex items-center justify-center bg-slate-900 custom-scrollbar relative"></div>
         </div>
     </div>
 
@@ -340,26 +496,320 @@
         <span id="toastMsg">Action Success</span>
     </div>
 
+    <!-- Web Worker Logic Inline -->
+    <script id="worker-script" type="application/javascript">
+        self.onmessage = async (e) => {
+            const { action, id, data, key, salt, iv, password } = e.data;
+            
+            try {
+                if (action === "DERIVE_KEY") {
+                    const encoder = new TextEncoder();
+                    const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+                    const derivedKey = await crypto.subtle.deriveKey(
+                        { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
+                        keyMaterial,
+                        { name: "AES-GCM", length: 256 },
+                        true,
+                        ["encrypt", "decrypt"]
+                    );
+                    self.postMessage({ id, status: "SUCCESS" });
+                } 
+                else if (action === "ENCRYPT" || action === "DECRYPT") {
+                    const encoder = new TextEncoder();
+                    const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+                    const cryptoKey = await crypto.subtle.deriveKey(
+                        { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
+                        keyMaterial,
+                        { name: "AES-GCM", length: 256 },
+                        false,
+                        ["encrypt", "decrypt"]
+                    );
+
+                    if (action === "ENCRYPT") {
+                        const generatedIv = crypto.getRandomValues(new Uint8Array(12));
+                        const encryptedContent = await crypto.subtle.encrypt(
+                            { name: "AES-GCM", iv: generatedIv },
+                            cryptoKey,
+                            data
+                        );
+                        const combined = new Uint8Array(generatedIv.length + encryptedContent.byteLength);
+                        combined.set(generatedIv);
+                        combined.set(new Uint8Array(encryptedContent), generatedIv.length);
+                        self.postMessage({ id, result: combined.buffer }, [combined.buffer]);
+                    } else {
+                        const dataView = new Uint8Array(data);
+                        const extractedIv = dataView.slice(0, 12);
+                        const encryptedContent = dataView.slice(12);
+                        const decrypted = await crypto.subtle.decrypt(
+                            { name: "AES-GCM", iv: extractedIv },
+                            cryptoKey,
+                            encryptedContent
+                        );
+                        self.postMessage({ id, result: decrypted }, [decrypted]);
+                    }
+                }
+            } catch (err) {
+                self.postMessage({ id, error: err.message });
+            }
+        };
+    </script>
+
     <script>
-        // --- REAL-TIME MONITORING LOGIC ---
+        // --- CONSTANTS ---
+        const MAX_VAULT_STORAGE_BYTES = 2.5 * 1024 * 1024 * 1024; // 2.5 GB Limit
+
+        // --- NEW SECURITY PROTECTION LOGIC ---
+        function initSecurityProtection() {
+            // 1. Detect Screen Capture/Sharing (Some browsers support this)
+            if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+                // Not a reliable blocker but can be used for detection
+            }
+
+            // 2. Prevent Common Keys for Screenshots/DevTools
+            window.addEventListener('keydown', (e) => {
+                // Block PrtScn (Limited support)
+                if (e.key === "PrintScreen") {
+                    document.body.classList.add('privacy-mask');
+                    showToast("Screenshot Diblokir");
+                    e.preventDefault();
+                }
+                // Block DevTools shortcuts
+                if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74)) || (e.ctrlKey && e.keyCode === 85)) {
+                    e.preventDefault();
+                    showToast("Akses Developer Diblokir");
+                }
+            });
+
+            // 3. Blur content when focus is lost (Prevents screenshot tools from capturing)
+            window.addEventListener('blur', () => {
+                if (cryptoKeyValid) {
+                    document.getElementById('mainAppContent').classList.add('privacy-mask');
+                    document.getElementById('recordProtector').style.display = 'block';
+                }
+            });
+
+            window.addEventListener('focus', () => {
+                document.getElementById('mainAppContent').classList.remove('privacy-mask');
+                document.getElementById('recordProtector').style.display = 'none';
+            });
+
+            // 4. Listen for Visibility Change
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    document.getElementById('mainAppContent').classList.add('privacy-mask');
+                } else {
+                    document.getElementById('mainAppContent').classList.remove('privacy-mask');
+                }
+            });
+        }
+
+        // --- CUSTOM CONFIRM ENGINE ---
+        function showConfirm(title, message, options = {}) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('customConfirmModal');
+                const titleEl = document.getElementById('confirmTitle');
+                const descEl = document.getElementById('confirmDesc');
+                const okBtn = document.getElementById('confirmOkBtn');
+                const cancelBtn = document.getElementById('confirmCancelBtn');
+                const iconCont = document.getElementById('confirmIconContainer');
+
+                titleEl.innerText = title;
+                descEl.innerText = message;
+                okBtn.innerText = options.okText || "Ya, Lanjutkan";
+                cancelBtn.innerText = options.cancelText || "Batalkan";
+
+                if (options.variant === 'danger') {
+                    iconCont.className = "w-16 h-16 bg-red-50 text-red-600 rounded-2xl flex items-center justify-center mx-auto mb-6";
+                    okBtn.className = "w-full bg-red-600 text-white font-bold py-4 rounded-2xl hover:bg-red-700 transition-all shadow-lg shadow-red-100";
+                } else {
+                    iconCont.className = "w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-6";
+                    okBtn.className = "w-full bg-indigo-600 text-white font-bold py-4 rounded-2xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100";
+                }
+
+                modal.classList.remove('hidden');
+
+                const cleanup = (val) => {
+                    modal.classList.add('hidden');
+                    okBtn.onclick = null;
+                    cancelBtn.onclick = null;
+                    resolve(val);
+                };
+
+                okBtn.onclick = () => cleanup(true);
+                cancelBtn.onclick = () => cleanup(false);
+            });
+        }
+
+        // --- GOOGLE DRIVE SYNC ENGINE ---
+        const CLIENT_ID = '388713506159-j2s8vltn9f15ivofsq6v0cl6jofre5d8.apps.googleusercontent.com'; // Public Demo ID
+        const SCOPES = 'https://www.googleapis.com/auth/drive.appdata';
+        let tokenClient;
+        let gapiInited = false;
+        let gapiAuthToken = null;
+
+        function gapiLoaded() { gapi.load('client', intializeGapiClient); }
+        async function intializeGapiClient() {
+            await gapi.client.init({
+                discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"],
+            });
+            gapiInited = true;
+        }
+        function gisLoaded() {
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID, scope: SCOPES,
+                callback: (resp) => {
+                    if (resp.error !== undefined) throw (resp);
+                    gapiAuthToken = resp.access_token;
+                    document.getElementById('driveUnconnected').classList.add('hidden');
+                    document.getElementById('driveConnected').classList.remove('hidden');
+                    showToast("Drive Terhubung");
+                    recordAuditLog("Google Drive Sync Terhubung", true);
+                },
+            });
+        }
+        function handleAuthClick() {
+            if (tokenClient) tokenClient.requestAccessToken({prompt: 'consent'});
+        }
+        function handleSignoutClick() {
+            const token = gapi.client.getToken();
+            if (token !== null) {
+                google.accounts.oauth2.revoke(token.access_token);
+                gapi.client.setToken('');
+                document.getElementById('driveUnconnected').classList.remove('hidden');
+                document.getElementById('driveConnected').classList.add('hidden');
+                showToast("Drive Terputus");
+            }
+        }
+
+        async function pushToCloud() {
+            if (!gapiAuthToken) return showToast("Hubungkan Drive dulu");
+            showToast("Memulai Push...");
+            try {
+                const items = await db.items.toArray();
+                const config = await db.config.toArray();
+                
+                const pushPackage = {
+                    items: items,
+                    config: config.filter(c => c.key === 'encryption_salt' || c.key === 'auth_signature'),
+                    timestamp: new Date().toISOString()
+                };
+
+                const blob = new Blob([JSON.stringify(pushPackage)], {type: 'application/json'});
+                const metadata = {
+                    'name': 'vault_sync_data.json.enc',
+                    'parents': ['appDataFolder']
+                };
+
+                const response = await gapi.client.drive.files.list({
+                    q: "name = 'vault_sync_data.json.enc' and 'appDataFolder' in parents",
+                    spaces: 'appDataFolder',
+                    fields: 'files(id)'
+                });
+                
+                const existingFile = response.result.files[0];
+                const form = new FormData();
+                form.append('metadata', new Blob([JSON.stringify(metadata)], {type: 'application/json'}));
+                form.append('file', blob);
+
+                const url = existingFile 
+                    ? `https://www.googleapis.com/upload/drive/v3/files/${existingFile.id}?uploadType=multipart`
+                    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+
+                const pushReq = await fetch(url, {
+                    method: existingFile ? 'PATCH' : 'POST',
+                    headers: new Headers({ 'Authorization': 'Bearer ' + gapiAuthToken }),
+                    body: form
+                });
+
+                if (pushReq.ok) {
+                    showToast("Sync Berhasil (E2EE)");
+                    recordAuditLog("Push ke Cloud Berhasil", true);
+                } else { throw new Error("Gagal kirim data"); }
+
+            } catch (e) { showToast("Sync Gagal: " + e.message); }
+        }
+
+        async function pullFromCloud() {
+            if (!gapiAuthToken) return showToast("Hubungkan Drive dulu");
+            
+            const confirmed = await showConfirm(
+                "Konfirmasi Pull", 
+                "Pull dari cloud akan MENGHAPUS data lokal saat ini dan menggantinya dengan data cloud. Lanjutkan?",
+                { variant: 'danger', okText: "Ya, Sinkronisasi" }
+            );
+            if (!confirmed) return;
+
+            showToast("Mengunduh Data...");
+            try {
+                const response = await gapi.client.drive.files.list({
+                    q: "name = 'vault_sync_data.json.enc' and 'appDataFolder' in parents",
+                    spaces: 'appDataFolder',
+                    fields: 'files(id)'
+                });
+
+                const file = response.result.files[0];
+                if (!file) throw new Error("Data cloud tidak ditemukan");
+
+                const download = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
+                    headers: new Headers({ 'Authorization': 'Bearer ' + gapiAuthToken })
+                });
+
+                const syncData = await download.json();
+                await db.items.clear();
+                await db.config.clear();
+                
+                for (let c of syncData.config) await db.config.put(c);
+                for (let i of syncData.items) await db.items.put(i);
+
+                showToast("Sync Selesai! Me-refresh...");
+                recordAuditLog("Pull dari Cloud Berhasil", true);
+                setTimeout(() => location.reload(), 1500);
+
+            } catch (e) { showToast("Pull Gagal: " + e.message); }
+        }
+
+        function openCloudModal() { document.getElementById('cloudModal').classList.remove('hidden'); }
+        function closeCloudModal() { document.getElementById('cloudModal').classList.add('hidden'); }
+
+        // --- WEB WORKER MANAGER ---
+        const workerBlob = new Blob([document.getElementById('worker-script').textContent], { type: 'application/javascript' });
+        const cryptoWorker = new Worker(URL.createObjectURL(workerBlob));
+        const workerCallbacks = new Map();
+
+        cryptoWorker.onmessage = (e) => {
+            const { id, result, error } = e.data;
+            if (workerCallbacks.has(id)) {
+                const { resolve, reject } = workerCallbacks.get(id);
+                workerCallbacks.delete(id);
+                if (error) reject(new Error(error));
+                else resolve(result);
+            }
+        };
+
+        function callWorker(payload, transferables = []) {
+            return new Promise((resolve, reject) => {
+                const id = crypto.randomUUID();
+                workerCallbacks.set(id, { resolve, reject });
+                cryptoWorker.postMessage({ ...payload, id, password: lastKnownPassword, salt: vaultSalt }, transferables);
+            });
+        }
+
+        // --- GLOBAL STATE ---
         let lastTimestamp = performance.now();
         let frameCount = 0;
+        let lastKnownPassword = "";
+        let vaultSalt = null;
+        let cryptoKeyValid = false;
         
         function updateStatsLoop() {
             const now = performance.now();
             frameCount++;
-            
             if (now >= lastTimestamp + 1000) {
-                // Estimate CPU load based on frame drops (browsers don't provide raw CPU % for security)
                 const fps = Math.round((frameCount * 1000) / (now - lastTimestamp));
                 const load = Math.max(0, 100 - Math.round((fps / 60) * 100));
-                
-                // Update UI
                 const cpuDisplay = document.getElementById('statCpu');
-                const sysVal = Math.min(100, Math.max(load, Math.floor(Math.random() * 5))); // Simulated background load
-                
+                const sysVal = Math.min(100, Math.max(load, Math.floor(Math.random() * 5)));
                 if (cpuDisplay) cpuDisplay.innerText = sysVal + '%';
-                
                 frameCount = 0;
                 lastTimestamp = now;
             }
@@ -367,7 +817,7 @@
         }
         requestAnimationFrame(updateStatsLoop);
 
-        // --- PWA SERVICE WORKER & MANIFEST SETUP ---
+        // --- PWA SETUP ---
         const manifestData = {
             "name": "CloudVault Pro",
             "short_name": "CloudVault",
@@ -375,49 +825,15 @@
             "display": "standalone",
             "background_color": "#ffffff",
             "theme_color": "#4f46e5",
-            "icons": [
-                {
-                    "src": "https://cdn-icons-png.flaticon.com/512/3064/3064197.png",
-                    "sizes": "512x512",
-                    "type": "image/png",
-                    "purpose": "any maskable"
-                }
-            ]
+            "icons": [{ "src": "https://cdn-icons-png.flaticon.com/512/891/891399.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }]
         };
-        const manifestString = JSON.stringify(manifestData);
-        const manifestBlob = new Blob([manifestString], {type: 'application/json'});
+        const manifestBlob = new Blob([JSON.stringify(manifestData)], {type: 'application/json'});
         document.getElementById('manifest-placeholder').setAttribute('href', URL.createObjectURL(manifestBlob));
-
-        // Inline Service Worker
-        if ('serviceWorker' in navigator) {
-            const swCode = `
-                const CACHE_NAME = 'cloudvault-v1';
-                const ASSETS = [
-                    '${window.location.href}',
-                    'https://cdn.tailwindcss.com',
-                    'https://unpkg.com/dexie/dist/dexie.js',
-                    'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap'
-                ];
-
-                self.addEventListener('install', (event) => {
-                    event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
-                });
-
-                self.addEventListener('fetch', (event) => {
-                    event.respondWith(
-                        caches.match(event.request).then((response) => response || fetch(event.request))
-                    );
-                });
-            `;
-            const swBlob = new Blob([swCode], {type: 'application/javascript'});
-            const swUrl = URL.createObjectURL(swBlob);
-            navigator.serviceWorker.register(swUrl).catch(err => console.log("SW Register Fail", err));
-        }
 
         // --- DATA LAYER ---
         const db = new Dexie("CloudVaultProDB");
-        db.version(2).stores({
-            items: "++id, name, type, size, date, category",
+        db.version(3).stores({
+            items: "++id, name, type, size, date, category, is_trash, deleted_at",
             config: "key",
             logs: "++id, date, status" 
         });
@@ -425,134 +841,79 @@
         let currentFilter = 'all';
         let searchQuery = '';
         let currentSort = 'date-desc';
-        let cryptoKey = null;
-        let loginAttempts = 0;
         const MAX_ATTEMPTS = 3;
-        const LOCKOUT_DELAY = 30000; // 30 Detik lockout
-
-        // --- AUTO LOCK FEATURE ---
+        const LOCKOUT_DELAY = 30000;
         let inactivityTimer;
-        const AUTO_LOCK_TIME = 5 * 60 * 1000; // 5 Menit (300.000 ms)
+        const AUTO_LOCK_TIME = 5 * 60 * 1000;
 
         function resetInactivityTimer() {
-            if (!cryptoKey) return; // Jangan reset jika vault belum terbuka
+            if (!cryptoKeyValid) return;
             clearTimeout(inactivityTimer);
-            inactivityTimer = setTimeout(() => {
-                // Auto Lock: Refresh halaman untuk menghapus key dari memori
-                location.reload();
-            }, AUTO_LOCK_TIME);
+            inactivityTimer = setTimeout(() => location.reload(), AUTO_LOCK_TIME);
         }
 
         function setupInactivityListeners() {
-            // Deteksi mouse, keyboard, sentuhan, dan scroll
             ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach(event => {
                 window.addEventListener(event, resetInactivityTimer);
             });
             resetInactivityTimer();
         }
 
-        // --- WEB CRYPTO API CORE ---
-        async function deriveKey(password, salt) {
-            const encoder = new TextEncoder();
-            const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-            return await crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
-                keyMaterial,
-                { name: "AES-GCM", length: 256 },
-                false,
-                ["encrypt", "decrypt"]
-            );
-        }
-
+        // --- WORKER-BASED CRYPTO HELPERS ---
         async function encryptData(data) {
-            if (!cryptoKey) return data;
-            const iv = crypto.getRandomValues(new Uint8Array(12));
-            const encryptedContent = await crypto.subtle.encrypt(
-                { name: "AES-GCM", iv },
-                cryptoKey,
-                data
-            );
-            const combined = new Uint8Array(iv.length + encryptedContent.byteLength);
-            combined.set(iv);
-            combined.set(new Uint8Array(encryptedContent), iv.length);
-            return combined.buffer;
+            if (!cryptoKeyValid) return data;
+            return await callWorker({ action: "ENCRYPT", data }, [data]);
         }
 
         async function decryptData(combinedData) {
-            if (!cryptoKey) return combinedData;
-            const dataView = new Uint8Array(combinedData);
-            const iv = dataView.slice(0, 12);
-            const encryptedContent = dataView.slice(12);
-            return await crypto.subtle.decrypt(
-                { name: "AES-GCM", iv },
-                cryptoKey,
-                encryptedContent
-            );
+            if (!cryptoKeyValid) return combinedData;
+            return await callWorker({ action: "DECRYPT", data: combinedData }, [combinedData]);
         }
 
         // --- AUDIT LOG LOGIC ---
         async function recordAuditLog(status, encrypted = true) {
             const timestamp = new Date().toISOString();
             let dataToStore;
-            
-            if (encrypted && cryptoKey) {
+            if (encrypted && cryptoKeyValid) {
                 const encoder = new TextEncoder();
                 dataToStore = await encryptData(encoder.encode(status).buffer);
             } else {
                 dataToStore = status;
             }
-
-            await db.logs.add({
-                date: timestamp,
-                status: dataToStore,
-                is_encrypted: encrypted
-            });
+            await db.logs.add({ date: timestamp, status: dataToStore, is_encrypted: encrypted });
         }
 
         async function openLogModal() {
-            if (!cryptoKey) return showToast("Buka vault dulu!");
+            if (!cryptoKeyValid) return showToast("Buka vault dulu!");
             document.getElementById('logModal').classList.remove('hidden');
             renderLogs();
         }
 
-        function closeLogModal() {
-            document.getElementById('logModal').classList.add('hidden');
-        }
+        function closeLogModal() { document.getElementById('logModal').classList.add('hidden'); }
 
         async function renderLogs() {
             const container = document.getElementById('logContent');
             const logs = await db.logs.orderBy('date').reverse().limit(50).toArray();
-            
             if (logs.length === 0) {
                 container.innerHTML = '<p class="text-center text-slate-400 py-8 text-sm">Belum ada riwayat akses.</p>';
                 return;
             }
-
             let html = '';
             for (const log of logs) {
                 let statusText = log.status;
-                if (log.is_encrypted && cryptoKey) {
+                if (log.is_encrypted && cryptoKeyValid) {
                     try {
                         const decrypted = await decryptData(log.status);
                         statusText = new TextDecoder().decode(decrypted);
-                    } catch (e) {
-                        statusText = "[Data Terenkripsi]";
-                    }
+                    } catch (e) { statusText = "[Data Terenkripsi]"; }
                 }
-
                 const isError = statusText.toLowerCase().includes('gagal');
-                const timeStr = new Date(log.date).toLocaleString('id-ID', {
-                    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
-                });
-
+                const timeStr = new Date(log.date).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
                 html += `
                 <div class="flex items-center justify-between p-3 rounded-2xl border ${isError ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}">
                     <div class="flex items-center gap-3">
                         <div class="w-8 h-8 rounded-full flex items-center justify-center ${isError ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}">
-                            ${isError ? 
-                                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>' : 
-                                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
-                            }
+                            ${isError ? '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>' : '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'}
                         </div>
                         <div>
                             <p class="text-xs font-bold text-slate-700">${statusText}</p>
@@ -565,283 +926,204 @@
         }
 
         async function clearLogs() {
-            if (confirm("Hapus seluruh riwayat akses?")) {
+            const confirmed = await showConfirm(
+                "Hapus Riwayat", 
+                "Apakah Anda yakin ingin menghapus seluruh riwayat akses audit? Tindakan ini tidak bisa dibatalkan.",
+                { variant: 'danger' }
+            );
+            if (confirmed) {
                 await db.logs.clear();
                 renderLogs();
                 showToast("Riwayat Berhasil Dihapus");
             }
         }
 
-        // --- BACKUP & RESTORE LOGIC ---
-        async function exportVault() {
-            if (!cryptoKey) return showToast("Buka vault dulu!");
-            
-            try {
-                const items = await db.items.toArray();
-                const config = await db.config.toArray();
-                const logs = await db.logs.toArray();
-                
-                const backupData = {
-                    items: items.map(i => ({
-                        ...i,
-                        content: btoa(String.fromCharCode(...new Uint8Array(i.content)))
-                    })),
-                    config: config.map(c => ({
-                        ...c,
-                        value: (c.key === 'encryption_salt' || c.key === 'auth_signature') 
-                            ? btoa(String.fromCharCode(...new Uint8Array(c.value))) 
-                            : c.value
-                    })),
-                    logs: logs.map(l => ({
-                        ...l,
-                        status: (l.is_encrypted) ? btoa(String.fromCharCode(...new Uint8Array(l.status))) : l.status
-                    })),
-                    timestamp: new Date().toISOString(),
-                    version: "1.1"
-                };
-
-                const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `Vault_Backup_${new Date().toISOString().split('T')[0]}.vault`;
-                a.click();
-                URL.revokeObjectURL(url);
-                showToast("Backup Berhasil Diunduh");
-            } catch (e) {
-                console.error(e);
-                showToast("Gagal melakukan backup");
+        // --- TRASH SYSTEM ---
+        async function cleanupTrash() {
+            const now = Date.now();
+            const threshold = now - (30 * 24 * 60 * 60 * 1000); // 30 days
+            const itemsToDelete = await db.items.where('is_trash').equals(1).and(i => i.deleted_at < threshold).toArray();
+            if (itemsToDelete.length > 0) {
+                await db.items.bulkDelete(itemsToDelete.map(i => i.id));
+                recordAuditLog(`Auto Cleanup Trash: ${itemsToDelete.length} item dihapus permanen`, true);
             }
         }
 
-        async function importVault(input) {
-            const file = input.files[0];
-            if (!file) return;
-
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const data = JSON.parse(e.target.result);
-                    
-                    if (!data.items || !data.config) throw new Error("Format tidak valid");
-
-                    const confirmVal = confirm("Mengimpor backup akan MENGHAPUS data vault saat ini. Lanjutkan?");
-                    if (!confirmVal) return;
-
-                    await db.items.clear();
-                    await db.config.clear();
-                    await db.logs.clear();
-
-                    // Restore Config
-                    for (let c of data.config) {
-                        let val = c.value;
-                        if (c.key === 'encryption_salt' || c.key === 'auth_signature') {
-                            val = new Uint8Array(atob(c.value).split("").map(char => char.charCodeAt(0))).buffer;
-                        }
-                        await db.config.put({ key: c.key, value: val });
-                    }
-
-                    // Restore Items
-                    for (let i of data.items) {
-                        const content = new Uint8Array(atob(i.content).split("").map(char => char.charCodeAt(0))).buffer;
-                        await db.items.add({
-                            name: i.name,
-                            type: i.type,
-                            size: i.size,
-                            date: i.date,
-                            category: i.category,
-                            content: content
-                        });
-                    }
-
-                    // Restore Logs (v1.1+)
-                    if (data.logs) {
-                        for (let l of data.logs) {
-                            let statusVal = l.status;
-                            if (l.is_encrypted) {
-                                statusVal = new Uint8Array(atob(l.status).split("").map(char => char.charCodeAt(0))).buffer;
-                            }
-                            await db.logs.add({
-                                date: l.date,
-                                status: statusVal,
-                                is_encrypted: l.is_encrypted
-                            });
-                        }
-                    }
-
-                    showToast("Restore Selesai! Me-refresh...");
-                    setTimeout(() => location.reload(), 1500);
-
-                } catch (err) {
-                    console.error(err);
-                    showToast("File backup rusak atau tidak valid!");
-                }
-            };
-            reader.readAsText(file);
-            input.value = '';
+        async function openTrashModal() {
+            if (!cryptoKeyValid) return showToast("Buka vault dulu!");
+            document.getElementById('trashModal').classList.remove('hidden');
+            renderTrashItems();
         }
 
-        // --- CUSTOM UI CONTROLS ---
+        function closeTrashModal() { document.getElementById('trashModal').classList.add('hidden'); }
+
+        async function renderTrashItems() {
+            const container = document.getElementById('trashContent');
+            const trashItems = await db.items.where('is_trash').equals(1).toArray();
+            if (trashItems.length === 0) {
+                container.innerHTML = '<p class="text-center text-slate-400 py-12 text-sm">Trash kosong.</p>';
+                return;
+            }
+            container.innerHTML = trashItems.map(item => `
+                <div class="flex items-center justify-between p-3 rounded-2xl border bg-slate-50 border-slate-100">
+                    <div class="flex items-center gap-3 overflow-hidden">
+                        <div class="flex-shrink-0 p-2 bg-red-50 text-red-500 rounded-lg">${getFileIcon(item.type, item.category)}</div>
+                        <div class="truncate">
+                            <p class="text-xs font-bold text-slate-700 truncate">${item.name}</p>
+                            <p class="text-[10px] text-slate-400 font-medium">Hapus: ${new Date(item.deleted_at).toLocaleDateString('id-ID')}</p>
+                        </div>
+                    </div>
+                    <div class="flex gap-1 ml-2">
+                        <button onclick="restoreFromTrash(${item.id})" class="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg" title="Pulihkan">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                        </button>
+                        <button onclick="deletePermanently(${item.id})" class="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Hapus Permanen">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function restoreFromTrash(id) {
+            await db.items.update(id, { is_trash: 0, deleted_at: null });
+            renderTrashItems();
+            renderData();
+            showToast("Item Dipulihkan");
+            recordAuditLog("Item Dipulihkan dari Trash", true);
+        }
+
+        async function deletePermanently(id) {
+            const confirmed = await showConfirm(
+                "Hapus Permanen", 
+                "File ini akan dihapus selamanya dari database lokal Anda. Tindakan ini tidak dapat dibatalkan.",
+                { variant: 'danger' }
+            );
+            if (!confirmed) return;
+
+            await db.items.delete(id);
+            renderTrashItems();
+            updateStorageInfo();
+            showToast("Terhapus Permanen");
+            recordAuditLog("Item Dihapus Permanen", true);
+        }
+
+        async function emptyTrash() {
+            const confirmed = await showConfirm(
+                "Kosongkan Trash", 
+                "Semua item di Tempat Sampah akan dihapus secara permanen. Lanjutkan?",
+                { variant: 'danger', okText: "Ya, Kosongkan" }
+            );
+            if (!confirmed) return;
+
+            const trashItems = await db.items.where('is_trash').equals(1).toArray();
+            await db.items.bulkDelete(trashItems.map(i => i.id));
+            renderTrashItems();
+            updateStorageInfo();
+            showToast("Trash Kosong");
+            recordAuditLog("Trash Dikosongkan", true);
+        }
+
+        // --- UI CONTROLS ---
         function toggleSortMenu() {
             const menu = document.getElementById('customSortMenu');
-            const isVisible = menu.style.display === 'block';
-            menu.style.display = isVisible ? 'none' : 'block';
+            menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
         }
 
         function selectSort(value, label) {
             currentSort = value;
             document.getElementById('currentSortLabel').innerText = label;
             document.getElementById('customSortMenu').style.display = 'none';
-            
-            // Update active state in UI
-            document.querySelectorAll('.sort-option').forEach(opt => {
-                if(opt.innerText === label) opt.classList.add('active');
-                else opt.classList.remove('active');
-            });
-            
+            document.querySelectorAll('.sort-option').forEach(opt => opt.innerText === label ? opt.classList.add('active') : opt.classList.remove('active'));
             renderData();
         }
 
-        // Close menu on outside click
         window.addEventListener('click', (e) => {
             const btn = document.getElementById('sortMenuBtn');
             const menu = document.getElementById('customSortMenu');
-            if (btn && menu && !btn.contains(e.target) && !menu.contains(e.target)) {
-                menu.style.display = 'none';
-            }
+            if (btn && menu && !btn.contains(e.target) && !menu.contains(e.target)) menu.style.display = 'none';
         });
 
-        // --- PASSWORD STRENGTH LOGIC ---
         function checkPasswordStrength(password) {
             let score = 0;
             if (password.length > 7) score++;
             if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
             if (/[0-9]/.test(password)) score++;
             if (/[^A-Za-z0-9]/.test(password)) score++;
-            
             const bar = document.getElementById('pwStrengthBar');
             const text = document.getElementById('pwStrengthText');
-            
-            if (password.length === 0) {
-                bar.style.width = '0%';
-                text.innerText = 'Lemah';
-                return;
-            }
-
+            if (password.length === 0) { bar.style.width = '0%'; text.innerText = 'Lemah'; return; }
             switch(score) {
-                case 0:
-                case 1:
-                    bar.style.width = '33%';
-                    bar.className = 'h-full transition-all duration-300 bg-red-500';
-                    text.innerText = 'Lemah';
-                    text.className = 'text-red-500';
-                    break;
-                case 2:
-                case 3:
-                    bar.style.width = '66%';
-                    bar.className = 'h-full transition-all duration-300 bg-amber-500';
-                    text.innerText = 'Sedang';
-                    text.className = 'text-amber-500';
-                    break;
+                case 0: case 1:
+                    bar.style.width = '33%'; bar.className = 'h-full bg-red-500'; text.innerText = 'Lemah'; text.className = 'text-red-500'; break;
+                case 2: case 3:
+                    bar.style.width = '66%'; bar.className = 'h-full bg-amber-500'; text.innerText = 'Sedang'; text.className = 'text-amber-500'; break;
                 case 4:
-                    bar.style.width = '100%';
-                    bar.className = 'h-full transition-all duration-300 bg-emerald-500';
-                    text.innerText = 'Kuat';
-                    text.className = 'text-emerald-500';
-                    break;
+                    bar.style.width = '100%'; bar.className = 'h-full bg-emerald-500'; text.innerText = 'Kuat'; text.className = 'text-emerald-500'; break;
             }
         }
 
-        // --- VERIFIKASI MEKANISME ---
+        // --- UNLOCK LOGIC ---
         async function unlockVault() {
             const pwdInput = document.getElementById('masterPassword');
             const pwd = pwdInput.value;
             const attemptsEl = document.getElementById('attemptsMsg');
-            const unlockBtn = document.getElementById('unlockBtn');
-
-            if (pwd.length < 4) {
-                showToast("Password minimal 4 karakter!");
-                return;
-            }
+            if (pwd.length < 4) { showToast("Password minimal 4 karakter!"); return; }
 
             try {
                 const lockStatus = await db.config.get('vault_locked');
-                if (lockStatus && lockStatus.value === true) {
-                    triggerPermanentLock();
-                    return;
-                }
+                if (lockStatus?.value === true) { triggerPermanentLock(); return; }
 
                 const lockout = await db.config.get('lockout_timestamp');
-                if (lockout && lockout.value > Date.now()) {
-                    const remainingSec = Math.ceil((lockout.value - Date.now()) / 1000);
-                    showToast(`Tunggu ${remainingSec} detik sebelum mencoba lagi.`);
+                if (lockout?.value > Date.now()) {
+                    showToast(`Tunggu ${Math.ceil((lockout.value - Date.now()) / 1000)} detik.`);
                     return;
                 }
 
                 let saltObj = await db.config.get('encryption_salt');
-                let salt;
                 const authCheck = await db.config.get('auth_signature');
                 
                 if (!authCheck) {
-                    salt = crypto.getRandomValues(new Uint8Array(16));
-                    await db.config.put({ key: 'encryption_salt', value: salt });
+                    vaultSalt = crypto.getRandomValues(new Uint8Array(16));
+                    lastKnownPassword = pwd;
+                    await db.config.put({ key: 'encryption_salt', value: vaultSalt });
                     
-                    cryptoKey = await deriveKey(pwd, salt);
+                    cryptoKeyValid = true; 
                     const encoder = new TextEncoder();
                     const signature = await encryptData(encoder.encode("2006").buffer);
                     
                     await db.config.put({ key: 'auth_signature', value: signature });
                     await db.config.put({ key: 'vault_locked', value: false });
                     await db.config.put({ key: 'login_attempts', value: 0 });
-                    
                     await recordAuditLog("Vault Baru Dibuat", true);
                     finalizeUnlock();
                 } else {
-                    salt = saltObj.value;
-                    const tempKey = await deriveKey(pwd, salt);
-                    
+                    vaultSalt = saltObj.value;
+                    lastKnownPassword = pwd;
                     try {
-                        const dataView = new Uint8Array(authCheck.value);
-                        const iv = dataView.slice(0, 12);
-                        const encryptedContent = dataView.slice(12);
-                        
-                        const decrypted = await crypto.subtle.decrypt(
-                            { name: "AES-GCM", iv },
-                            tempKey,
-                            encryptedContent
-                        );
-                        
-                        const text = new TextDecoder().decode(decrypted);
-                        if (text === "2006") {
-                            cryptoKey = tempKey;
+                        const testDecrypt = await decryptData(authCheck.value);
+                        if (new TextDecoder().decode(testDecrypt) === "2006") {
+                            cryptoKeyValid = true;
                             await db.config.put({ key: 'login_attempts', value: 0 });
                             await recordAuditLog("Login Berhasil", true);
                             finalizeUnlock();
-                        } else {
-                            throw new Error("Invalid");
-                        }
+                        } else { throw new Error(); }
                     } catch (e) {
-                        cryptoKey = null;
-                        
-                        let storedAttempts = await db.config.get('login_attempts');
-                        let currentAttempts = (storedAttempts ? storedAttempts.value : 0) + 1;
-                        await db.config.put({ key: 'login_attempts', value: currentAttempts });
-
-                        // Log kegagalan (tidak dienkripsi karena kunci tidak tersedia)
+                        cryptoKeyValid = false;
+                        lastKnownPassword = "";
+                        let stored = await db.config.get('login_attempts');
+                        let count = (stored?.value || 0) + 1;
+                        await db.config.put({ key: 'login_attempts', value: count });
                         await recordAuditLog("Gagal Login - Password Salah", false);
-
-                        const remaining = MAX_ATTEMPTS - currentAttempts;
-                        
+                        const remaining = MAX_ATTEMPTS - count;
                         if (remaining <= 0) {
-                            if (currentAttempts === MAX_ATTEMPTS) {
+                            if (count === MAX_ATTEMPTS) {
                                 const until = Date.now() + LOCKOUT_DELAY;
                                 await db.config.put({ key: 'lockout_timestamp', value: until });
-                                showToast(`Terlalu banyak kegagalan. Coba lagi dalam 30 detik.`);
+                                showToast("Terlalu banyak kegagalan. Lockout 30 detik.");
                                 startLockoutTimer(until);
                             } else {
                                 await db.config.put({ key: 'vault_locked', value: true });
-                                await db.config.delete('auth_signature'); 
-                                await db.config.delete('encryption_salt');
                                 triggerPermanentLock();
                             }
                         } else {
@@ -852,26 +1134,17 @@
                         }
                     }
                 }
-            } catch (e) {
-                showToast("Gagal memproses keamanan.");
-            }
+            } catch (e) { showToast("Gagal memproses keamanan."); }
         }
 
         function startLockoutTimer(until) {
-            const unlockBtn = document.getElementById('unlockBtn');
-            const originalText = unlockBtn.innerHTML;
-            
+            const btn = document.getElementById('unlockBtn');
             const timer = setInterval(() => {
-                const now = Date.now();
-                const diff = Math.ceil((until - now) / 1000);
-                
+                const diff = Math.ceil((until - Date.now()) / 1000);
                 if (diff <= 0) {
-                    clearInterval(timer);
-                    unlockBtn.disabled = false;
-                    unlockBtn.innerHTML = originalText;
+                    clearInterval(timer); btn.disabled = false; btn.innerHTML = "<span>Buka Vault</span>";
                 } else {
-                    unlockBtn.disabled = true;
-                    unlockBtn.innerHTML = `<span>Tunggu ${diff}s</span>`;
+                    btn.disabled = true; btn.innerHTML = `<span>Tunggu ${diff}s</span>`;
                 }
             }, 1000);
         }
@@ -884,136 +1157,86 @@
         function finalizeUnlock() {
             document.getElementById('authOverlay').style.display = 'none';
             showToast("Vault Berhasil Dibuka");
-            renderData();
-            updateStorageInfo();
-            setupInactivityListeners();
+            cleanupTrash(); // Run auto cleanup
+            renderData(); updateStorageInfo(); setupInactivityListeners();
+            initSecurityProtection(); // Start privacy protection
+            gapiLoaded(); gisLoaded();
         }
 
-        // --- APP LOGIC ---
-        const observer = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => {
-                if (mutation.removedNodes.length) {
-                    mutation.removedNodes.forEach(node => {
-                        if(node.id === 'securityOverlay' || node.id === 'authOverlay') location.reload();
-                    });
-                }
-            });
-        });
-        observer.observe(document.body, { childList: true });
-
         window.onload = async () => {
-            const lockStatus = await db.config.get('vault_locked');
-            if (lockStatus && lockStatus.value === true) {
-                triggerPermanentLock();
-                return;
-            }
+            setTimeout(() => {
+                const loader = document.getElementById('initial-loader');
+                loader.classList.add('fade-out');
+                setTimeout(() => loader.remove(), 600);
+            }, 1000);
 
+            if ((await db.config.get('vault_locked'))?.value === true) return triggerPermanentLock();
+            
             const lockout = await db.config.get('lockout_timestamp');
-            if (lockout && lockout.value > Date.now()) {
-                startLockoutTimer(lockout.value);
+            if (lockout?.value > Date.now()) startLockoutTimer(lockout.value);
+
+            const attempts = await db.config.get('login_attempts');
+            if (attempts?.value > 0 && attempts.value < MAX_ATTEMPTS) {
+                const el = document.getElementById('attemptsMsg');
+                el.innerText = `Sisa ${MAX_ATTEMPTS - attempts.value} percobaan lagi`;
+                el.classList.remove('hidden');
             }
 
-            const storedAttempts = await db.config.get('login_attempts');
-            if (storedAttempts && storedAttempts.value > 0 && storedAttempts.value < MAX_ATTEMPTS) {
-                const remaining = MAX_ATTEMPTS - storedAttempts.value;
-                const attemptsEl = document.getElementById('attemptsMsg');
-                attemptsEl.innerText = `Sisa ${remaining} percobaan lagi`;
-                attemptsEl.classList.remove('hidden');
-            }
-
-            const authCheck = await db.config.get('auth_signature');
-            const masterInput = document.getElementById('masterPassword');
-
-            if(!authCheck) {
+            if (!(await db.config.get('auth_signature'))) {
                 document.getElementById('authTitle').innerText = "Buat Password Baru";
                 document.getElementById('authDesc').innerText = "Tentukan password untuk mengenkripsi vault baru Anda.";
                 document.getElementById('unlockBtn').innerText = "Buat Vault";
                 document.getElementById('pwStrengthCont').classList.remove('hidden');
-                masterInput.addEventListener('input', (e) => checkPasswordStrength(e.target.value));
+                document.getElementById('masterPassword').addEventListener('input', (e) => checkPasswordStrength(e.target.value));
             }
-
-            masterInput.focus();
+            document.getElementById('masterPassword').focus();
             document.onkeydown = (e) => {
-                if (e.keyCode == 123 || (e.ctrlKey && e.shiftKey && (e.keyCode == 73 || e.keyCode == 74))) {
-                    showToast("Security: Inspector restricted");
-                    return false;
-                }
                 if (e.key === 'Enter' && document.getElementById('authOverlay').style.display !== 'none') {
-                    const unlockBtn = document.getElementById('unlockBtn');
-                    if(!unlockBtn.disabled) unlockVault();
+                    if(!document.getElementById('unlockBtn').disabled) unlockVault();
                 }
             };
         };
 
-        const dropzone = document.getElementById('dropzone');
         const fileInput = document.getElementById('fileInput');
-        dropzone.onclick = () => fileInput.click();
+        document.getElementById('dropzone').onclick = () => fileInput.click();
         
         fileInput.onchange = async (e) => {
             const files = Array.from(e.target.files);
             if (files.length === 0) return;
-
-            // Show Progress UI
             const statusUI = document.getElementById('uploadStatus');
             const bar = document.getElementById('uploadBar');
             const percentText = document.getElementById('uploadPercent');
             const nameText = document.getElementById('uploadFileName');
-            
             statusUI.classList.remove('translate-y-32', 'opacity-0');
 
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                
-                // Update Name
                 nameText.innerText = `(${i + 1}/${files.length}) ${file.name}`;
-                
-                if (file.size > 2 * 1024 * 1024 * 1024) {
-                    showToast(`File ${file.name} terlalu besar (>2GB)`);
-                    continue;
-                }
-
-                // Process with manual progress updates
+                if (file.size > MAX_VAULT_STORAGE_BYTES) { showToast(`File ${file.name} > 2.5GB`); continue; }
                 await processAndSaveFile(file, (prog) => {
-                    // This is local file reading progress
                     const totalProgress = Math.round(((i / files.length) * 100) + (prog / files.length));
                     bar.style.width = totalProgress + '%';
                     percentText.innerText = totalProgress + '%';
                 });
             }
-
-            // Reset UI
-            bar.style.width = '100%';
-            percentText.innerText = '100%';
+            bar.style.width = '100%'; percentText.innerText = '100%';
             setTimeout(() => {
                 statusUI.classList.add('translate-y-32', 'opacity-0');
-                renderData();
-                updateStorageInfo();
-                showToast(`${files.length} File Berhasil Terenkripsi`);
+                renderData(); updateStorageInfo(); showToast(`${files.length} File Berhasil`);
             }, 1000);
-
             fileInput.value = '';
         };
 
         async function processAndSaveFile(file, onProgress) {
             return new Promise(resolve => {
                 const reader = new FileReader();
-                
-                reader.onprogress = (e) => {
-                    if (e.lengthComputable && onProgress) {
-                        const percent = Math.round((e.loaded / e.total) * 100);
-                        onProgress(percent);
-                    }
-                };
-
+                reader.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100)); };
                 reader.onload = async () => {
                     const encrypted = await encryptData(reader.result);
                     await db.items.add({
-                        name: escapeHtml(file.name),
-                        type: file.type || 'application/octet-stream',
-                        size: file.size,
-                        date: new Date().toISOString(),
-                        content: encrypted,
-                        category: 'file'
+                        name: escapeHtml(file.name), type: file.type || 'application/octet-stream',
+                        size: file.size, date: new Date().toISOString(), content: encrypted, 
+                        category: 'file', is_trash: 0, deleted_at: null
                     });
                     resolve();
                 };
@@ -1023,44 +1246,25 @@
 
         async function saveNote() {
             const inputEl = document.getElementById('noteInput');
-            const text = inputEl.value.trim();
-            if(!text) return;
-            
+            const text = inputEl.value.trim(); if(!text) return;
             const encoder = new TextEncoder();
             const encrypted = await encryptData(encoder.encode(text).buffer);
-
             await db.items.add({
                 name: escapeHtml(text.substring(0, 40)) + (text.length > 40 ? '...' : ''),
-                type: 'text/plain',
-                size: new Blob([text]).size,
-                date: new Date().toISOString(),
-                content: encrypted,
-                category: 'note'
+                type: 'text/plain', size: new Blob([text]).size, date: new Date().toISOString(),
+                content: encrypted, category: 'note', is_trash: 0, deleted_at: null
             });
-            inputEl.value = '';
-            showToast("Catatan Terenkripsi Disimpan");
-            renderData();
-            updateStorageInfo();
+            inputEl.value = ''; showToast("Catatan Disimpan"); renderData(); updateStorageInfo();
         }
 
-        function handleSearch() {
-            searchQuery = document.getElementById('searchInput').value.toLowerCase();
-            renderData();
-        }
+        function handleSearch() { searchQuery = document.getElementById('searchInput').value.toLowerCase(); renderData(); }
 
         async function renderData() {
-            if (!cryptoKey) return;
+            if (!cryptoKeyValid) return;
             const grid = document.getElementById('contentGrid');
-            let items = await db.items.toArray();
-            
-            if (currentFilter !== 'all') {
-                items = items.filter(i => i.category === currentFilter);
-            }
-
-            if (searchQuery) {
-                items = items.filter(i => i.name.toLowerCase().includes(searchQuery));
-            }
-
+            let items = await db.items.where('is_trash').equals(0).toArray();
+            if (currentFilter !== 'all') items = items.filter(i => i.category === currentFilter);
+            if (searchQuery) items = items.filter(i => i.name.toLowerCase().includes(searchQuery));
             items.sort((a, b) => {
                 switch(currentSort) {
                     case 'date-desc': return new Date(b.date) - new Date(a.date);
@@ -1073,14 +1277,7 @@
             });
 
             if (items.length === 0) {
-                grid.innerHTML = `
-                    <div class="col-span-full py-24 text-center">
-                        <div class="inline-flex p-5 bg-slate-100 rounded-full mb-4 text-slate-300">
-                            <svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
-                        </div>
-                        <h4 class="text-slate-500 font-medium text-lg">${searchQuery ? 'Hasil Tidak Ditemukan' : 'Vault Kosong'}</h4>
-                        <p class="text-slate-400 text-sm">Coba kata kunci lain atau tambahkan data baru.</p>
-                    </div>`;
+                grid.innerHTML = `<div class="col-span-full py-24 text-center"><div class="inline-flex p-5 bg-slate-100 rounded-full mb-4 text-slate-300"><svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg></div><h4 class="text-slate-500 font-medium text-lg">Hasil Tidak Ditemukan</h4></div>`;
                 return;
             }
 
@@ -1090,107 +1287,104 @@
                 return `
                 <div class="group bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all p-4 relative flex flex-col h-[200px]">
                     <div class="flex items-start justify-between mb-2">
-                        <div class="p-2.5 rounded-xl ${isNote ? 'bg-amber-50 text-amber-600' : 'bg-indigo-50 text-indigo-600'}">
-                            ${getFileIcon(item.type, item.category)}
-                        </div>
-                        <button onclick="deleteItem(${item.id})" class="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                        </button>
+                        <div class="p-2.5 rounded-xl ${isNote ? 'bg-amber-50 text-amber-600' : 'bg-indigo-50 text-indigo-600'}">${getFileIcon(item.type, item.category)}</div>
+                        <button onclick="deleteItem(${item.id})" class="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
                     </div>
-                    <div class="flex-grow cursor-default overflow-hidden">
+                    <div class="flex-grow overflow-hidden cursor-default">
                         <h3 class="font-bold text-slate-800 text-sm line-clamp-2 mb-1">${item.name}</h3>
-                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">${formatBytes(item.size)} • ${date}</p>
+                        <p class="text-[10px] font-bold text-slate-400 uppercase">${formatBytes(item.size)} • ${date}</p>
                     </div>
                     <div class="grid grid-cols-2 gap-2 mt-4">
-                        <button onclick="openPreview(${item.id})" class="bg-slate-100 text-slate-600 py-2 rounded-lg text-[10px] font-bold hover:bg-slate-200 transition-colors">PREVIEW</button>
-                        <button onclick="downloadItem(${item.id})" class="bg-indigo-600 text-white py-2 rounded-lg text-[10px] font-bold hover:bg-indigo-700 transition-colors">UNDUH</button>
+                        <button onclick="openPreview(${item.id})" class="bg-slate-100 text-slate-600 py-2 rounded-lg text-[10px] font-bold hover:bg-slate-200">PREVIEW</button>
+                        <button onclick="downloadItem(${item.id})" class="bg-indigo-600 text-white py-2 rounded-lg text-[10px] font-bold hover:bg-indigo-700">UNDUH</button>
                     </div>
                 </div>`;
             }).join('');
         }
 
         async function openPreview(id) {
-            const item = await db.items.get(id);
-            if (!item) return;
-
+            const item = await db.items.get(id); if (!item) return;
             const modal = document.getElementById('previewModal');
             const content = document.getElementById('modalContent');
-            content.innerHTML = '<div class="text-white animate-pulse">Dekripsi data aman...</div>';
-            
+            content.innerHTML = '<div class="text-white animate-pulse">Dekripsi data aman via Worker...</div>';
             document.getElementById('modalTitle').innerText = item.name;
             document.getElementById('modalMeta').innerText = `${item.type} • ${formatBytes(item.size)}`;
             document.getElementById('modalIcon').innerHTML = getFileIcon(item.type, item.category);
             document.getElementById('modalDownload').onclick = () => downloadItem(id);
-
-            modal.classList.remove('hidden');
-            document.body.classList.add('modal-active');
+            modal.classList.remove('hidden'); document.body.classList.add('modal-active');
 
             try {
                 const decryptedBuffer = await decryptData(item.content);
                 const blob = new Blob([decryptedBuffer], { type: item.type });
                 const url = URL.createObjectURL(blob);
-                
-                if (item.type.startsWith('image/')) {
-                    content.innerHTML = `<img src="${url}" class="max-w-full max-h-full object-contain p-4">`;
-                } else if (item.type.startsWith('video/')) {
-                    content.innerHTML = `<video src="${url}" controls class="max-w-full max-h-full rounded-lg" autoplay></video>`;
-                } else if (item.type.startsWith('audio/') || item.name.toLowerCase().endsWith('.mp3')) {
-                    content.innerHTML = `
-                        <div class="flex flex-col items-center gap-6 p-10 text-white">
-                            <div class="w-32 h-32 bg-indigo-500 rounded-full flex items-center justify-center shadow-2xl">
-                                <svg class="w-16 h-16" fill="currentColor" viewBox="0 0 20 20"><path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z"></path></svg>
-                            </div>
-                            <audio src="${url}" controls class="w-full max-w-md" autoplay></audio>
-                        </div>`;
-                } else if (item.type === 'application/pdf') {
-                    content.innerHTML = `<iframe src="${url}#toolbar=0" class="w-full h-full border-none"></iframe>`;
-                } else if (item.category === 'note' || item.type.startsWith('text/')) {
+                if (item.type.startsWith('image/')) content.innerHTML = `<img src="${url}" class="max-w-full max-h-full object-contain p-4">`;
+                else if (item.type.startsWith('video/')) content.innerHTML = `<video src="${url}" controls class="max-w-full max-h-full" autoplay></video>`;
+                else if (item.type.startsWith('audio/') || item.name.toLowerCase().endsWith('.mp3')) content.innerHTML = `<div class="p-10 text-white flex flex-col items-center gap-6"><audio src="${url}" controls autoplay></audio></div>`;
+                else if (item.type === 'application/pdf') content.innerHTML = `<iframe src="${url}#toolbar=0" class="w-full h-full"></iframe>`;
+                else if (item.category === 'note' || item.type.startsWith('text/')) {
                     const text = new TextDecoder().decode(decryptedBuffer);
-                    content.innerHTML = `<div class="bg-white w-full h-full p-8 font-mono text-sm overflow-auto text-slate-800 whitespace-pre-wrap select-text">${escapeHtml(text)}</div>`;
-                } else {
-                    content.innerHTML = `<div class="text-center text-white p-8"><p class="mb-4">Format ini tidak dapat ditampilkan langsung.</p><button onclick="downloadItem(${id})" class="bg-indigo-500 px-6 py-2 rounded-xl">Download untuk Melihat</button></div>`;
+                    content.innerHTML = `
+                        <div class="relative w-full h-full bg-white group/content">
+                            <button onclick="copyToClipboardText()" class="absolute top-4 right-4 z-20 bg-indigo-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all flex items-center gap-2">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
+                                Salin Teks
+                            </button>
+                            <div id="noteContentArea" class="w-full h-full p-8 font-mono text-sm overflow-auto text-slate-800 whitespace-pre-wrap select-text selection:bg-indigo-100">${escapeHtml(text)}</div>
+                        </div>`;
                 }
+                else content.innerHTML = `<div class="text-center text-white p-8"><button onclick="downloadItem(${id})" class="bg-indigo-500 px-6 py-2 rounded-xl">Download untuk Melihat</button></div>`;
+            } catch (err) { content.innerHTML = `<div class="text-red-400">Gagal dekripsi.</div>`; }
+        }
+
+        function copyToClipboardText() {
+            const textArea = document.getElementById('noteContentArea');
+            if (!textArea) return;
+            const text = textArea.innerText;
+            const tempInput = document.createElement("textarea");
+            tempInput.value = text;
+            document.body.appendChild(tempInput);
+            tempInput.select();
+            tempInput.setSelectionRange(0, 99999);
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) showToast("Teks Berhasil Disalin!");
             } catch (err) {
-                content.innerHTML = `<div class="text-red-400">Gagal dekripsi: Password salah atau data rusak.</div>`;
+                showToast("Gagal menyalin teks.");
             }
+            document.body.removeChild(tempInput);
         }
 
         function closePreview() {
             const modal = document.getElementById('previewModal');
             const content = document.getElementById('modalContent');
-            const media = content.querySelectorAll('video, audio');
-            media.forEach(m => m.pause());
-            modal.classList.add('hidden');
-            document.body.classList.remove('modal-active');
-            const tags = content.querySelectorAll('[src]');
-            tags.forEach(t => URL.revokeObjectURL(t.src));
+            content.querySelectorAll('video, audio').forEach(m => m.pause());
+            modal.classList.add('hidden'); document.body.classList.remove('modal-active');
+            content.querySelectorAll('[src]').forEach(t => URL.revokeObjectURL(t.src));
             content.innerHTML = '';
         }
 
         async function downloadItem(id) {
-            const item = await db.items.get(id);
-            if (!item) return;
+            const item = await db.items.get(id); if (!item) return;
             try {
-                const decryptedBuffer = await decryptData(item.content);
-                const blob = new Blob([decryptedBuffer], { type: item.type });
+                const decrypted = await decryptData(item.content);
+                const blob = new Blob([decrypted], { type: item.type });
                 const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = item.category === 'note' ? item.name + ".txt" : item.name;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-            } catch (e) {
-                showToast("Gagal mendownload: Masalah dekripsi.");
-            }
+                const a = document.createElement('a'); a.href = url; a.download = item.category === 'note' ? item.name + ".txt" : item.name;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+            } catch (e) { showToast("Gagal dekripsi."); }
         }
 
-        async function deleteItem(id) {
-            await db.items.delete(id);
-            renderData();
-            updateStorageInfo();
-            showToast("Item Berhasil Dihapus");
+        async function deleteItem(id) { 
+            const confirmed = await showConfirm(
+                "Buang ke Trash?", 
+                "File ini akan dipindahkan ke Tempat Sampah dan akan dihapus otomatis setelah 30 hari.",
+                { okText: "Pindahkan" }
+            );
+            if (!confirmed) return;
+            await db.items.update(id, { is_trash: 1, deleted_at: Date.now() });
+            renderData(); 
+            showToast("Pindah ke Trash (30 Hari)"); 
+            recordAuditLog("Item dipindah ke Trash", true);
         }
 
         function filterType(type) {
@@ -1200,7 +1394,6 @@
                 btn.classList.add('text-slate-500');
             });
             event.currentTarget.classList.add('active', 'bg-slate-100', 'text-indigo-600');
-            event.currentTarget.classList.remove('text-slate-500');
             renderData();
         }
 
@@ -1208,26 +1401,16 @@
             try {
                 const quota = await navigator.storage.estimate();
                 const used = quota.usage || 0;
-                const total = quota.quota || (1024 * 1024 * 2048); // 2GB fallback for stats
-                const remaining = total - used;
-                
-                // Mobile Dashboard
-                const statUsed = document.getElementById('statUsed');
-                if (statUsed) statUsed.innerText = formatBytes(used);
-                
-                const statRem = document.getElementById('statRemaining');
-                if (statRem) statRem.innerText = formatBytes(remaining);
-
-            } catch (e) {
-                console.log("Stats error", e);
-            }
+                const total = Math.min(quota.quota || MAX_VAULT_STORAGE_BYTES, MAX_VAULT_STORAGE_BYTES);
+                document.getElementById('statUsed').innerText = formatBytes(used);
+                document.getElementById('statRemaining').innerText = formatBytes(Math.max(0, total - used));
+            } catch (e) {}
         }
 
         function getFileIcon(type, category) {
-            if (category === 'note') return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
-            if (type.startsWith('image/')) return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>`;
-            if (type.startsWith('video/')) return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>`;
-            return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>`;
+            if (category === 'note') return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
+            if (type.startsWith('image/')) return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>`;
+            return `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>`;
         }
 
         function formatBytes(bytes) {
@@ -1243,21 +1426,7 @@
             setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 3000);
         }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        async function clearAllData() {
-            const confirmVal = prompt("Ketik 'HAPUS' untuk mengonfirmasi pembersihan vault (SEMUA DATA AKAN HILANG PERMANEN):");
-            if (confirmVal === 'HAPUS') {
-                await db.items.clear();
-                await db.config.clear();
-                await db.logs.clear();
-                location.reload();
-            }
-        }
+        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
     </script>
 </body>
 </html>
